@@ -144,12 +144,12 @@ func TestServeConfigMutations(t *testing.T) {
 			},
 		},
 	})
-	add(step{
+	add(step{ // invalid port
 		command: cmd("--serve-port=9999 /abc proxy 3001"),
 		wantErr: anyErr(),
-	}) // invalid port
+	})
 	add(step{
-		command: cmd("--serve-port=8443 /abc proxy 3001"),
+		command: cmd("/abc proxy 3001 --serve-port=8443"),
 		want: &ipn.ServeConfig{
 			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}, 8443: {HTTPS: true}},
 			Web: map[ipn.HostPort]*ipn.WebServerConfig{
@@ -180,11 +180,10 @@ func TestServeConfigMutations(t *testing.T) {
 			},
 		},
 	})
-	add(step{
+	add(step{ // handler doesn't exist, so we get an error
 		command: cmd("--remove /foo"),
-		want:    nil, // nothing to save
 		wantErr: anyErr(),
-	}) // handler doesn't exist, so we get an error
+	})
 	add(step{
 		command: cmd("--remove --serve-port=10000 /"),
 		want: &ipn.ServeConfig{
@@ -200,7 +199,7 @@ func TestServeConfigMutations(t *testing.T) {
 		},
 	})
 	add(step{
-		command: cmd("--remove /"),
+		command: cmd("/ --remove"),
 		want: &ipn.ServeConfig{
 			TCP: map[uint16]*ipn.TCPPortHandler{8443: {HTTPS: true}},
 			Web: map[ipn.HostPort]*ipn.WebServerConfig{
@@ -211,7 +210,7 @@ func TestServeConfigMutations(t *testing.T) {
 		},
 	})
 	add(step{
-		command: cmd("--remove --serve-port=8443 /abc"),
+		command: cmd("/abc --remove --serve-port=8443"),
 		want:    &ipn.ServeConfig{},
 	})
 	add(step{
@@ -253,8 +252,8 @@ func TestServeConfigMutations(t *testing.T) {
 			},
 		},
 	})
-	add(step{ // test a second handler on the same port
-		command: cmd("--serve-port=8443 /foo proxy localhost:3000"),
+	add(step{ // test the same proxy on a different serve port
+		command: cmd("/foo proxy localhost:3000 --serve-port=8443"),
 		want: &ipn.ServeConfig{
 			TCP: map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}, 8443: {HTTPS: true}},
 			Web: map[ipn.HostPort]*ipn.WebServerConfig{
@@ -321,12 +320,12 @@ func TestServeConfigMutations(t *testing.T) {
 			},
 		},
 	})
-	add(step{
-		command: cmd("--remove tcp 321"),
+	add(step{ // handler doesn't exist, so we get an error
+		command: cmd("tcp 321 --remove"),
 		wantErr: anyErr(),
-	}) // handler doesn't exist, so we get an error
+	})
 	add(step{
-		command: cmd("--remove tcp 123"),
+		command: cmd("tcp 123 --remove"),
 		want:    &ipn.ServeConfig{},
 	})
 
@@ -395,7 +394,7 @@ func TestServeConfigMutations(t *testing.T) {
 		},
 	})
 	add(step{
-		command: cmd("--remove /"),
+		command: cmd("/ --remove"),
 		want:    &ipn.ServeConfig{},
 	})
 
@@ -470,7 +469,7 @@ func TestServeConfigMutations(t *testing.T) {
 		},
 	})
 	add(step{ // remove secondary port
-		command: cmd("--serve-port=8443 --remove /bar"),
+		command: cmd("--serve-port=8443 /bar --remove"),
 		want: &ipn.ServeConfig{
 			AllowFunnel: map[ipn.HostPort]bool{"foo.test.ts.net:8443": true},
 			TCP:         map[uint16]*ipn.TCPPortHandler{443: {HTTPS: true}},

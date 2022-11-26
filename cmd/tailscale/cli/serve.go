@@ -34,6 +34,12 @@ var serveCmd = newServeCommand(&serveEnv{})
 
 // newServeCommand returns a new "serve" subcommand using e as its environmment.
 func newServeCommand(e *serveEnv) *ffcli.Command {
+	// Global flags are are used by most subcommands. Their ordering is relaxed.
+	// See serveEnv.parseGlobalFlags for more details.
+	e.globalFlags = e.newFlags("serve", func(fs *flag.FlagSet) {
+		fs.BoolVar(&e.remove, "remove", false, "remove an existing serve config")
+		fs.UintVar(&e.servePort, "serve-port", 443, "port to serve on (443, 8443 or 10000)")
+	})
 	return &ffcli.Command{
 		Name:      "serve",
 		ShortHelp: "[ALPHA] Serve from your Tailscale node",
@@ -63,11 +69,8 @@ EXAMPLES
   - To serve simple static text:
     $ tailscale serve / text "Hello, world!"
 `),
-		Exec: e.runServe,
-		FlagSet: e.newFlags("serve", func(fs *flag.FlagSet) {
-			fs.BoolVar(&e.remove, "remove", false, "remove an existing serve config")
-			fs.UintVar(&e.servePort, "serve-port", 443, "port to serve on (443, 8443 or 10000)")
-		}),
+		Exec:      e.preExec(e.runServe),
+		FlagSet:   e.globalFlags,
 		UsageFunc: usageFunc,
 		Subcommands: []*ffcli.Command{
 			{
@@ -81,7 +84,7 @@ EXAMPLES
 			},
 			{
 				Name:      "tcp",
-				Exec:      e.runServeTCP,
+				Exec:      e.preExec(e.runServeTCP),
 				ShortHelp: "add or remove a TCP port forward",
 				LongHelp: strings.Join([]string{
 					"EXAMPLES",
@@ -114,6 +117,50 @@ EXAMPLES
 	}
 }
 
+// preExec is a wrapper around ffcli.Command.Exec allowing us to
+// pre-process the command line arguments before they are passed to
+// the actual command.
+// Serve uses this validate the serve port and allow relaxed
+// ordering of global flags.
+func (e *serveEnv) preExec(execFn func(context.Context, []string) error) func(context.Context, []string) error {
+	if execFn == nil {
+		panic("execFn is nil")
+	}
+	return func(ctx context.Context, args []string) (err error) {
+		args, err = e.parseGlobalFlags(args)
+		if err != nil {
+			return err
+		}
+		err = e.validateServePort()
+		if err != nil {
+			return err
+		}
+		return execFn(ctx, args)
+	}
+}
+
+// parseGlobalFlags allows for relaxed ordering of global flags.
+// It conditionally parses the serveEnv's global flags, and returns a new
+// slice of arguments with the global flags removed.
+// This parse step is intended to be called prior to the commands Exec function.
+func (e *serveEnv) parseGlobalFlags(allArgs []string) (args []string, err error) {
+	var flags []string
+	for _, arg := range allArgs {
+		if arg[0] == '-' {
+			flags = append(flags, arg)
+		} else {
+			args = append(args, arg)
+		}
+	}
+	if len(flags) == 0 {
+		return allArgs, nil
+	}
+	if err := e.globalFlags.Parse(flags); err != nil {
+		return args, err
+	}
+	return args, nil
+}
+
 func (e *serveEnv) newFlags(name string, setup func(fs *flag.FlagSet)) *flag.FlagSet {
 	onError, out := flag.ExitOnError, Stderr
 	if e.testFlagOut != nil {
@@ -137,6 +184,8 @@ type serveEnv struct {
 	terminateTLS bool
 	remove       bool // remove a serve config
 	json         bool // output JSON (status only for now)
+
+	globalFlags *flag.FlagSet // flags used by multiple subcommands
 
 	// optional stuff for tests:
 	testFlagOut              io.Writer
@@ -194,19 +243,20 @@ func (e *serveEnv) setServeConfig(ctx context.Context, c *ipn.ServeConfig) error
 	return localClient.SetServeConfig(ctx, c)
 }
 
-// validateServePort returns --serve-port flag value,
-// or an error if the port is not a valid port to serve on.
-func (e *serveEnv) validateServePort() (port uint16, err error) {
-	// make sure e.servePort is uint16
-	port = uint16(e.servePort)
-	if uint(port) != e.servePort {
-		return 0, fmt.Errorf("serve-port %d is out of range", e.servePort)
+// validateServePort checks that the serve port is valid.
+// Returns an error if the port is out of range or not
+// one of the allowed ports.
+func (e *serveEnv) validateServePort() error {
+	if e.servePort != uint(uint16(e.servePort)) {
+		return fmt.Errorf("serve-port %d is out of range", e.servePort)
 	}
-	// make sure e.servePort is 443, 8443 or 10000
-	if port != 443 && port != 8443 && port != 10000 {
-		return 0, fmt.Errorf("serve-port %d is invalid; must be 443, 8443 or 10000", e.servePort)
+	switch e.servePort {
+	case 443, 8443, 10000:
+		// OK
+	default:
+		return fmt.Errorf("serve-port %d is invalid; must be 443, 8443 or 10000", e.servePort)
 	}
-	return port, nil
+	return nil
 }
 
 // runServe is the entry point for the "serve" subcommand, managing Web
@@ -239,12 +289,6 @@ func (e *serveEnv) runServe(ctx context.Context, args []string) error {
 		fmt.Fprintf(os.Stderr, "error: invalid number of arguments\n\n")
 		return flag.ErrHelp
 	}
-
-	srvPort, err := e.validateServePort()
-	if err != nil {
-		return err
-	}
-	srvPortStr := strconv.Itoa(int(srvPort))
 
 	mount, err := cleanMountPoint(args[0])
 	if err != nil {
@@ -306,14 +350,14 @@ func (e *serveEnv) runServe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	hp := ipn.HostPort(net.JoinHostPort(dnsName, srvPortStr))
+	hp := ipn.HostPort(net.JoinHostPort(dnsName, strconv.Itoa(int(e.servePort))))
 
-	if sc.IsTCPForwardingOnPort(srvPort) {
+	if sc.IsTCPForwardingOnPort(uint16(e.servePort)) {
 		fmt.Fprintf(os.Stderr, "error: cannot serve web; already serving TCP\n")
 		return flag.ErrHelp
 	}
 
-	mak.Set(&sc.TCP, srvPort, &ipn.TCPPortHandler{HTTPS: true})
+	mak.Set(&sc.TCP, uint16(e.servePort), &ipn.TCPPortHandler{HTTPS: true})
 
 	if _, ok := sc.Web[hp]; !ok {
 		mak.Set(&sc.Web, hp, new(ipn.WebServerConfig))
@@ -346,11 +390,7 @@ func (e *serveEnv) runServe(ctx context.Context, args []string) error {
 }
 
 func (e *serveEnv) handleWebServeRemove(ctx context.Context, mount string) error {
-	srvPort, err := e.validateServePort()
-	if err != nil {
-		return err
-	}
-	srvPortStr := strconv.Itoa(int(srvPort))
+	srvPortStr := strconv.Itoa(int(e.servePort))
 	sc, err := e.getServeConfig(ctx)
 	if err != nil {
 		return err
@@ -362,7 +402,7 @@ func (e *serveEnv) handleWebServeRemove(ctx context.Context, mount string) error
 	if err != nil {
 		return err
 	}
-	if sc.IsTCPForwardingOnPort(srvPort) {
+	if sc.IsTCPForwardingOnPort(uint16(e.servePort)) {
 		return errors.New("cannot remove web handler; currently serving TCP")
 	}
 	hp := ipn.HostPort(net.JoinHostPort(dnsName, srvPortStr))
@@ -373,7 +413,7 @@ func (e *serveEnv) handleWebServeRemove(ctx context.Context, mount string) error
 	delete(sc.Web[hp].Handlers, mount)
 	if len(sc.Web[hp].Handlers) == 0 {
 		delete(sc.Web, hp)
-		delete(sc.TCP, srvPort)
+		delete(sc.TCP, uint16(e.servePort))
 	}
 	// clear empty maps mostly for testing
 	if len(sc.Web) == 0 {
@@ -592,11 +632,6 @@ func (e *serveEnv) runServeTCP(ctx context.Context, args []string) error {
 		return flag.ErrHelp
 	}
 
-	srvPort, err := e.validateServePort()
-	if err != nil {
-		return err
-	}
-
 	portStr := args[0]
 	p, err := strconv.ParseUint(portStr, 10, 16)
 	if p == 0 || err != nil {
@@ -614,16 +649,16 @@ func (e *serveEnv) runServeTCP(ctx context.Context, args []string) error {
 
 	fwdAddr := "127.0.0.1:" + portStr
 
-	if sc.IsServingWeb(srvPort) {
+	if sc.IsServingWeb(uint16(e.servePort)) {
 		if e.remove {
-			return fmt.Errorf("unable to remove; serving web, not TCP forwarding on serve port %d", srvPort)
+			return fmt.Errorf("unable to remove; serving web, not TCP forwarding on serve port %d", e.servePort)
 		}
-		return fmt.Errorf("cannot serve TCP; already serving web on %d", srvPort)
+		return fmt.Errorf("cannot serve TCP; already serving web on %d", e.servePort)
 	}
 
 	if e.remove {
-		if ph := sc.GetTCPPortHandler(srvPort); ph != nil && ph.TCPForward == fwdAddr {
-			delete(sc.TCP, srvPort)
+		if ph := sc.GetTCPPortHandler(uint16(e.servePort)); ph != nil && ph.TCPForward == fwdAddr {
+			delete(sc.TCP, uint16(e.servePort))
 			// clear map mostly for testing
 			if len(sc.TCP) == 0 {
 				sc.TCP = nil
@@ -633,14 +668,14 @@ func (e *serveEnv) runServeTCP(ctx context.Context, args []string) error {
 		return errors.New("error: serve config does not exist")
 	}
 
-	mak.Set(&sc.TCP, srvPort, &ipn.TCPPortHandler{TCPForward: fwdAddr})
+	mak.Set(&sc.TCP, uint16(e.servePort), &ipn.TCPPortHandler{TCPForward: fwdAddr})
 
 	dnsName, err := e.getSelfDNSName(ctx)
 	if err != nil {
 		return err
 	}
 	if e.terminateTLS {
-		sc.TCP[srvPort].TerminateTLS = dnsName
+		sc.TCP[uint16(e.servePort)].TerminateTLS = dnsName
 	}
 
 	if !reflect.DeepEqual(cursc, sc) {
@@ -660,12 +695,6 @@ func (e *serveEnv) runServeFunnel(ctx context.Context, args []string) error {
 	if len(args) != 1 {
 		return flag.ErrHelp
 	}
-
-	srvPort, err := e.validateServePort()
-	if err != nil {
-		return err
-	}
-	srvPortStr := strconv.Itoa(int(srvPort))
 
 	var on bool
 	switch args[0] {
@@ -689,7 +718,7 @@ func (e *serveEnv) runServeFunnel(ctx context.Context, args []string) error {
 		return err
 	}
 	dnsName := strings.TrimSuffix(st.Self.DNSName, ".")
-	hp := ipn.HostPort(dnsName + ":" + srvPortStr)
+	hp := ipn.HostPort(dnsName + ":" + strconv.Itoa(int(e.servePort)))
 	isFun := sc.IsFunnelOn(hp)
 	if on && isFun || !on && !isFun {
 		// Nothing to do.
