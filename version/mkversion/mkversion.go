@@ -340,7 +340,7 @@ func infoFromCache(ref string, runner dirRunner) (verInfo, error) {
 	r := dirRunner(mirageCache)
 
 	if _, err := os.Stat(mirageCache); err != nil {
-		if !runner.ok("git", "clone", "https://github.com/MirageNetwork/MirageClient", mirageCache) {
+		if !runner.ok("git", "clone", "https://github.com/gps949/MirageClient", mirageCache) {
 			return verInfo{}, fmt.Errorf("cloning MirageClient repo failed")
 		}
 	}
