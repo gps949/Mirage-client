@@ -217,7 +217,12 @@ main() {
 				VERSION="tumbleweed"
 				PACKAGETYPE="zypper"
 				;;
-			arch|archarm|endeavouros)
+			sle-micro-rancher)
+				OS="opensuse"
+				VERSION="leap/15.4"
+				PACKAGETYPE="zypper"
+				;;
+			arch|archarm|endeavouros|blendos)
 				OS="arch"
 				VERSION="" # rolling release
 				PACKAGETYPE="pacman"
