@@ -63,7 +63,7 @@ func AllowDebugAccess(r *http.Request) bool {
 		return false
 	}
 
-	if true || tsaddr.IsTailscaleIP(ip) || ip.IsLoopback() || ipStr == envknob.String("TS_ALLOW_DEBUG_IP") { //cgao6: temp open
+	if tsaddr.IsTailscaleIP(ip) || ip.IsLoopback() || ipStr == envknob.String("TS_ALLOW_DEBUG_IP") {
 		return true
 	}
 	if r.Method == "GET" {
