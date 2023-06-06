@@ -216,7 +216,7 @@ func (s *Server) TryLogin() (NaviNode, error) {
 	}
 
 	s.trustNodesCache.Clear()
-	s.trustNodesCache.SetWithTTL("seqnum", 0, 1, 0)
+	s.trustNodesCache.SetWithTTL("seqnum", uint32(0), 1, 0)
 	for _, nkey := range resp.TrustNodes {
 		s.trustNodesCache.SetWithTTL(nkey, struct{}{}, 1, 0)
 	}
@@ -290,7 +290,7 @@ func (s *Server) PullNodesList() error {
 	s.logf("map response: %v", resp)
 
 	s.trustNodesCache.Clear()
-	s.trustNodesCache.SetWithTTL("seqnum", 0, 1, 0)
+	s.trustNodesCache.SetWithTTL("seqnum", uint32(0), 1, 0)
 	for _, nkey := range resp.TrustNodes {
 		s.trustNodesCache.SetWithTTL(nkey, struct{}{}, 1, 0)
 	}
