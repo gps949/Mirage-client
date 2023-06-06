@@ -432,9 +432,15 @@ func (t *ts2021App) NoiseNodeChangeHandler(
 	}
 	t.navi.trustNodesCache.SetWithTTL("seqnum", nodesChange.SeqNum, 1, 0)
 	if nodesChange.AddNode != "" {
-		t.navi.trustNodesCache.SetWithTTL(nodesChange.AddNode, struct{}{}, 1, 0)
+		addedNodes := strings.Split(nodesChange.AddNode, ",")
+		for _, addedNode := range addedNodes {
+			t.navi.trustNodesCache.SetWithTTL(addedNode, struct{}{}, 1, 0)
+		}
 	}
 	if nodesChange.RemoveNode != "" {
-		t.navi.trustNodesCache.Del(nodesChange.RemoveNode)
+		removedNodes := strings.Split(nodesChange.RemoveNode, ",")
+		for _, removedNode := range removedNodes {
+			t.navi.trustNodesCache.Del(removedNode)
+		}
 	}
 }
