@@ -388,7 +388,7 @@ func (t *ts2021App) NoiseAuthMiddleware(
 }
 
 type NodesChange struct {
-	SeqNum     int
+	SeqNum     uint32
 	AddNode    string
 	RemoveNode string
 }
@@ -415,7 +415,7 @@ func (t *ts2021App) NoiseNodeChangeHandler(
 		http.Error(w, "seqnum not found", http.StatusInternalServerError)
 		return
 	}
-	seqnum, ok := sq.(int)
+	seqnum, ok := sq.(uint32)
 	if !ok {
 		log.Error().Msg("seqnum not int")
 		http.Error(w, "seqnum not int", http.StatusInternalServerError)
