@@ -19,6 +19,7 @@ require (
 	github.com/creack/pty v1.1.18
 	github.com/dave/jennifer v1.6.1
 	github.com/dblohm7/wingoes v0.0.0-20230426155039-111c8c3b57c8
+	github.com/dgraph-io/ristretto v0.1.1
 	github.com/dsnet/try v0.0.3
 	github.com/evanw/esbuild v0.14.53
 	github.com/frankban/quicktest v1.14.5
@@ -50,7 +51,6 @@ require (
 	github.com/mdlayher/sdnotify v1.0.0
 	github.com/miekg/dns v1.1.54
 	github.com/mitchellh/go-ps v1.0.0
-	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/peterbourgon/ff/v3 v3.3.0
 	github.com/pkg/errors v0.9.1
 	github.com/pkg/sftp v1.13.5
@@ -100,7 +100,11 @@ require (
 	software.sslmate.com/src/go-pkcs12 v0.2.0
 )
 
-require 4d63.com/gocheckcompilerdirectives v1.2.1 // indirect
+require (
+	4d63.com/gocheckcompilerdirectives v1.2.1 // indirect
+	github.com/dustin/go-humanize v1.0.0 // indirect
+	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b // indirect
+)
 
 require (
 	4d63.com/gochecknoglobals v0.2.1 // indirect

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dgraph-io/ristretto"
 	"github.com/gorilla/mux"
-	"github.com/patrickmn/go-cache"
 	"github.com/robfig/cron/v3"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/net/http2"
@@ -142,12 +142,20 @@ func decode(res *http.Response, v any) error {
 }
 
 // 在受管情况下进行初始化
-func (s *Server) PrepareManaged(url, id string, naviKey key.MachinePrivate) error {
+func (s *Server) PrepareManaged(url, id string, naviKey key.MachinePrivate) (err error) {
 	s.ctx = context.Background()
 	s.ctrlURL = url
 	s.derpID = id
 	s.naviPriKey = naviKey
-	s.trustNodesCache = cache.New(0, 0)
+	s.trustNodesCache, err = ristretto.NewCache(&ristretto.Config{
+		NumCounters:        1000000,
+		MaxCost:            100000,
+		BufferItems:        64,
+		IgnoreInternalCost: true,
+	})
+	if err != nil {
+		return fmt.Errorf("create trustNodesCache: %v", err)
+	}
 	s.Cronjob = cron.New()
 	return s.prepareNoiseClient()
 }
@@ -207,12 +215,11 @@ func (s *Server) TryLogin() (NaviNode, error) {
 		return NaviNode{}, fmt.Errorf("register request: %v", err)
 	}
 
-	s.trustNodesCache.Flush()
-	s.trustNodesCache.Set("seqnum", 0, -1)
+	s.trustNodesCache.Clear()
+	s.trustNodesCache.SetWithTTL("seqnum", 0, 1, 0)
 	for _, nkey := range resp.TrustNodes {
-		s.trustNodesCache.Set(nkey, struct{}{}, -1)
+		s.trustNodesCache.SetWithTTL(nkey, struct{}{}, 1, 0)
 	}
-
 	s.logf("register response: %v", resp)
 
 	return resp.NaviInfo, nil
@@ -282,10 +289,10 @@ func (s *Server) PullNodesList() error {
 	}
 	s.logf("map response: %v", resp)
 
-	s.trustNodesCache.Flush()
-	s.trustNodesCache.Set("seqnum", 0, -1)
+	s.trustNodesCache.Clear()
+	s.trustNodesCache.SetWithTTL("seqnum", 0, 1, 0)
 	for _, nkey := range resp.TrustNodes {
-		s.trustNodesCache.Set(nkey, struct{}{}, -1)
+		s.trustNodesCache.SetWithTTL(nkey, struct{}{}, 1, 0)
 	}
 
 	return nil
@@ -423,11 +430,11 @@ func (t *ts2021App) NoiseNodeChangeHandler(
 		}
 		return
 	}
-	t.navi.trustNodesCache.Set("seqnum", nodesChange.SeqNum, -1)
+	t.navi.trustNodesCache.SetWithTTL("seqnum", nodesChange.SeqNum, 1, 0)
 	if nodesChange.AddNode != "" {
-		t.navi.trustNodesCache.Set(nodesChange.AddNode, struct{}{}, -1)
+		t.navi.trustNodesCache.SetWithTTL(nodesChange.AddNode, struct{}{}, 1, 0)
 	}
 	if nodesChange.RemoveNode != "" {
-		t.navi.trustNodesCache.Delete(nodesChange.RemoveNode)
+		t.navi.trustNodesCache.Del(nodesChange.RemoveNode)
 	}
 }

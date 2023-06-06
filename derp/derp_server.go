@@ -32,7 +32,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/patrickmn/go-cache"
+	"github.com/dgraph-io/ristretto"
 	"github.com/robfig/cron/v3"
 	"go4.org/mem"
 	"golang.org/x/sync/errgroup"
@@ -107,8 +107,8 @@ type Server struct {
 	netMon   *netmon.Monitor    // or nil
 	dnsCache *dnscache.Resolver // or nil
 
-	trustNodesCache *cache.Cache // 用于存储受信客户端信息
-	Cronjob         *cron.Cron   // 用于定时从控制器拉取受信客户端信息
+	trustNodesCache *ristretto.Cache // 用于存储受信客户端信息
+	Cronjob         *cron.Cron       // 用于定时从控制器拉取受信客户端信息
 
 	// WriteTimeout, if non-zero, specifies how long to wait
 	// before failing when writing to a client.
