@@ -188,6 +188,9 @@ func (d *derpProber) updateMap(ctx context.Context) error {
 			if existing, ok := d.nodes[n.HostName]; ok {
 				return fmt.Errorf("derpmap has duplicate nodes: %+v and %+v", existing, n)
 			}
+			// Allow the prober to monitor nodes marked as
+			// STUN only in the default map
+			n.STUNOnly = false
 			d.nodes[n.HostName] = n
 		}
 	}
