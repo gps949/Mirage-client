@@ -125,11 +125,6 @@ For help on subcommands, add --help after: "mirage status --help".
 		Exec:      func(context.Context, []string) error { return flag.ErrHelp },
 		UsageFunc: usageFunc,
 	}
-	for _, c := range rootCmd.Subcommands {
-		if c.UsageFunc == nil {
-			c.UsageFunc = usageFunc
-		}
-	}
 	if envknob.UseWIPCode() {
 		rootCmd.Subcommands = append(rootCmd.Subcommands,
 			idTokenCmd,
@@ -172,6 +167,9 @@ For help on subcommands, add --help after: "mirage status --help".
 	backRootCmd.FlagSet = &backRootfs
 	backRootCmd.Subcommands = []*ffcli.Command{}
 	for _, c := range rootCmd.Subcommands {
+		if c.UsageFunc == nil {
+			c.UsageFunc = usageFunc
+		}
 		if c.Name == "up" || c.Name == "login" {
 			backCmd := *c
 			backRootCmd.Subcommands = append(backRootCmd.Subcommands, &backCmd)

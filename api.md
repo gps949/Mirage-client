@@ -101,8 +101,8 @@ You can also [list all devices in the tailnet](#list-tailnet-devices) to get the
 ``` jsonc
 {
   // addresses (array of strings) is a list of Tailscale IP
-  // addresses for the device, including both ipv4 (formatted as 100.x.y.z)
-  // and ipv6 (formatted as fd7a:115c:a1e0:a:b:c:d:e) addresses.
+  // addresses for the device, including both IPv4 (formatted as 100.x.y.z)
+  // and IPv6 (formatted as fd7a:115c:a1e0:a:b:c:d:e) addresses.
   "addresses": [
     "100.87.74.78",
     "fd7a:115c:a1e0:ac82:4843:ca90:697d:c36e"
@@ -1113,6 +1113,21 @@ Look at the response body to determine whether there was a problem within your A
            ]
   }
   ```
+
+If your tailnet has [user and group provisioning](https://tailscale.com/kb/1180/sso-okta-scim/) turned on, we will also warn you about
+any groups that are used in the policy file that are not being synced from SCIM. Explicitly defined groups will not trigger this warning.
+
+```jsonc
+{
+  "message":"warning(s) found",
+  "data":[
+          {
+            "user": "group:unknown@example.com",
+            "warnings":["group is not syncing from SCIM and will be ignored by rules in the policy file"]
+          }
+        ]
+}
+```
 
 <a href="tailnet-devices"></a>
 

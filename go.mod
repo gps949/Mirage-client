@@ -60,28 +60,29 @@ require (
 	github.com/tailscale/certstore v0.1.1-0.20220316223106-78d6e1c49d8d
 	github.com/tailscale/depaware v0.0.0-20210622194025-720c4b409502
 	github.com/tailscale/goexpect v0.0.0-20210902213824-6e8c725cea41
-	github.com/tailscale/golang-x-crypto v0.0.0-20221115211329-17a3db2c30d2
+	github.com/tailscale/golang-x-crypto v0.0.0-20230713185742-f0b76a10a08e
 	github.com/tailscale/goupnp v1.0.1-0.20210804011211-c64d0f06ea05
 	github.com/tailscale/hujson v0.0.0-20221223112325-20486734a56a
 	github.com/tailscale/mkctr v0.0.0-20220601142259-c0b937af2e89
 	github.com/tailscale/netlink v1.1.1-0.20211101221916-cabfb018fe85
-	github.com/tailscale/wireguard-go v0.0.0-20230410165232-af172621b4dd
+	github.com/tailscale/wireguard-go v0.0.0-20230710185534-bb2c8f22eccf
 	github.com/tc-hib/winres v0.2.0
 	github.com/tcnksm/go-httpstat v0.2.0
 	github.com/toqueteos/webbrowser v1.2.0
 	github.com/u-root/u-root v0.11.0
 	github.com/vishvananda/netlink v1.2.1-beta.2
+	github.com/vishvananda/netns v0.0.4
 	go.uber.org/zap v1.24.0
 	go4.org/mem v0.0.0-20220726221520-4f986261bf13
 	go4.org/netipx v0.0.0-20230303233057-f1b76eb4bb35
-	golang.org/x/crypto v0.8.0
+	golang.org/x/crypto v0.11.0
 	golang.org/x/exp v0.0.0-20230425010034-47ecfdc1ba53
 	golang.org/x/mod v0.10.0
 	golang.org/x/net v0.10.0
 	golang.org/x/oauth2 v0.7.0
 	golang.org/x/sync v0.2.0
-	golang.org/x/sys v0.8.1-0.20230609144347-5059a07aa46a
-	golang.org/x/term v0.8.0
+	golang.org/x/sys v0.10.0
+	golang.org/x/term v0.10.0
 	golang.org/x/time v0.3.0
 	golang.org/x/tools v0.9.1
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
@@ -160,7 +161,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/denis-tingaikin/go-header v0.4.3 // indirect
 	github.com/docker/cli v23.0.5+incompatible // indirect
-	github.com/docker/distribution v2.8.1+incompatible // indirect
+	github.com/docker/distribution v2.8.2+incompatible // indirect
 	github.com/docker/docker v23.0.5+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.7.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.10.2 // indirect
@@ -331,7 +332,6 @@ require (
 	github.com/ultraware/whitespace v0.0.5 // indirect
 	github.com/uudashr/gocognit v1.0.6 // indirect
 	github.com/vbatts/tar-split v0.11.2 // indirect
-	github.com/vishvananda/netns v0.0.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/yagipy/maintidx v1.0.0 // indirect
@@ -342,7 +342,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20230425010034-47ecfdc1ba53 // indirect
 	golang.org/x/image v0.7.0 // indirect
-	golang.org/x/text v0.9.0 // indirect
+	golang.org/x/text v0.11.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.3.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/protobuf v1.30.0 // indirect

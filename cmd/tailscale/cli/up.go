@@ -30,7 +30,6 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 	"golang.org/x/oauth2/clientcredentials"
 	"tailscale.com/client/tailscale"
-	"tailscale.com/envknob"
 	"tailscale.com/health/healthmsg"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
@@ -726,7 +725,8 @@ func runUp(ctx context.Context, cmd string, args []string, upArgs upArgsT) (retE
 // the health check, rather than just a string.
 func upWorthyWarning(s string) bool {
 	return strings.Contains(s, healthmsg.TailscaleSSHOnBut) ||
-		strings.Contains(s, healthmsg.WarnAcceptRoutesOff)
+		strings.Contains(s, healthmsg.WarnAcceptRoutesOff) ||
+		strings.Contains(s, healthmsg.LockedOut)
 }
 
 func checkUpWarnings(ctx context.Context) {
@@ -1131,9 +1131,6 @@ func init() {
 func resolveAuthKey(ctx context.Context, v, tags string) (string, error) {
 	if !strings.HasPrefix(v, "tskey-client-") {
 		return v, nil
-	}
-	if !envknob.Bool("TS_EXPERIMENT_OAUTH_AUTHKEY") {
-		return "", errors.New("oauth authkeys are in experimental status")
 	}
 	if tags == "" {
 		return "", errors.New("oauth authkeys require --advertise-tags")

@@ -3,7 +3,7 @@
 
 package tailcfg
 
-//go:generate go run tailscale.com/cmd/viewer --type=User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,DERPRegion,DERPMap,DERPNode,SSHRule,SSHAction,SSHPrincipal,ControlDialPlan,Location --clonefunc
+//go:generate go run tailscale.com/cmd/viewer --type=User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,DERPHomeParams,DERPRegion,DERPMap,DERPNode,SSHRule,SSHAction,SSHPrincipal,ControlDialPlan,Location,UserProfile --clonefunc
 
 import (
 	"bytes"
@@ -100,7 +100,10 @@ type CapabilityVersion int
 //   - 61: 2023-04-18: Client understand SSHAction.SSHRecorderFailureAction
 //   - 62: 2023-05-05: Client can notify control over noise for SSHEventNotificationRequest recording failure events
 //   - 63: 2023-06-08: Client understands SSHAction.AllowRemotePortForwarding.
-const CurrentCapabilityVersion CapabilityVersion = 63
+//   - 64: 2023-07-11: Client understands s/CapabilityTailnetLockAlpha/CapabilityTailnetLock
+//   - 65: 2023-07-12: Client understands DERPMap.HomeParams + incremental DERPMap updates with params
+//   - 66: 2023-07-23: UserProfile.Groups added (available via WhoIs)
+const CurrentCapabilityVersion CapabilityVersion = 66
 
 type StableID string
 
@@ -173,6 +176,27 @@ type UserProfile struct {
 	// Roles exists for legacy reasons, to keep old macOS clients
 	// happy. It JSON marshals as [].
 	Roles emptyStructJSONSlice
+
+	// Groups contains group identifiers for any group that this user is
+	// a part of and that the coordination server is configured to tell
+	// your node about. (Thus, it may be empty or incomplete.)
+	// There's no semantic difference between a nil and an empty list.
+	// The list is always sorted.
+	Groups []string `json:",omitempty"`
+}
+
+func (p *UserProfile) Equal(p2 *UserProfile) bool {
+	if p == nil && p2 == nil {
+		return true
+	}
+	if p == nil || p2 == nil {
+		return false
+	}
+	return p.ID == p2.ID &&
+		p.LoginName == p2.LoginName &&
+		p.DisplayName == p2.DisplayName &&
+		p.ProfilePicURL == p2.ProfilePicURL &&
+		(len(p.Groups) == 0 && len(p2.Groups) == 0 || reflect.DeepEqual(p.Groups, p2.Groups))
 }
 
 type emptyStructJSONSlice struct{}
@@ -211,10 +235,20 @@ type Node struct {
 	Addresses    []netip.Prefix // IP addresses of this Node directly
 	AllowedIPs   []netip.Prefix // range of IP addresses to route to this node
 	Endpoints    []string       `json:",omitempty"` // IP+port (public via STUN, and local LANs)
-	DERP         string         `json:",omitempty"` // DERP-in-IP:port ("127.3.3.40:N") endpoint
-	Hostinfo     HostinfoView
-	Created      time.Time
-	Cap          CapabilityVersion `json:",omitempty"` // if non-zero, the node's capability version; old servers might not send
+
+	// DERP is this node's home DERP region ID integer, but shoved into an
+	// IP:port string for legacy reasons. The IP address is always "127.3.3.40"
+	// (a loopback address (127) followed by the digits over the letters DERP on
+	// a QWERTY keyboard (3.3.40)). The "port number" is the home DERP region ID
+	// integer.
+	//
+	// TODO(bradfitz): simplify this legacy mess; add a new HomeDERPRegionID int
+	// field behind a new capver bump.
+	DERP string `json:",omitempty"` // DERP-in-IP:port ("127.3.3.40:N") endpoint
+
+	Hostinfo HostinfoView
+	Created  time.Time
+	Cap      CapabilityVersion `json:",omitempty"` // if non-zero, the node's capability version; old servers might not send
 
 	// Tags are the list of ACL tags applied to this node.
 	// Tags take the form of `tag:<value>` where value starts
@@ -241,8 +275,6 @@ type Node struct {
 	// coordination server.  A value of nil means unknown, or the
 	// current node doesn't have permission to know.
 	Online *bool `json:",omitempty"`
-
-	KeepAlive bool `json:",omitempty"` // open and keep open a connection to this peer
 
 	MachineAuthorized bool `json:",omitempty"` // TODO(crawshaw): replace with MachineStatus
 
@@ -535,15 +567,22 @@ type Service struct {
 // Tailscale host. Location is optional and only set if
 // explicitly declared by a node.
 type Location struct {
-	Country     string `json:",omitempty"` // User friendly country name, with proper capitalization, e.g "Canada"
-	CountryCode string `json:",omitempty"` // ISO 3166-1 alpha-2 in lower case, e.g "ca"
-	City        string `json:",omitempty"` // User friendly city name, with proper capitalization, e.g. "Squamish"
-	CityCode    string `json:",omitempty"`
+	Country     string `json:",omitempty"` // User friendly country name, with proper capitalization ("Canada")
+	CountryCode string `json:",omitempty"` // ISO 3166-1 alpha-2 in upper case ("CA")
+	City        string `json:",omitempty"` // User friendly city name, with proper capitalization ("Squamish")
 
-	// Priority determines the priority an exit node is given when the
-	// location data between two or more nodes is tied.
-	// A higher value indicates that the exit node is more preferable
-	// for use.
+	// CityCode is a short code representing the city in upper case.
+	// CityCode is used to disambiguate a city from another location
+	// with the same city name. It uniquely identifies a particular
+	// geographical location, within the tailnet.
+	// IATA, ICAO or ISO 3166-2 codes are recommended ("YSE")
+	CityCode string `json:",omitempty"`
+
+	// Priority determines the order of use of an exit node when a
+	// location based preference matches more than one exit node,
+	// the node with the highest priority wins. Nodes of equal
+	// probability may be selected arbitrarily.
+	//
 	// A value of 0 means the exit node does not have a priority
 	// preference. A negative int is not allowed.
 	Priority int `json:",omitempty"`
@@ -670,11 +709,12 @@ type NetInfo struct {
 	// Empty means not checked.
 	PCP opt.Bool
 
-	// PreferredDERP is this node's preferred DERP server
-	// for incoming traffic. The node might be be temporarily
-	// connected to multiple DERP servers (to send to other nodes)
-	// but PreferredDERP is the instance number that the node
-	// subscribes to traffic at.
+	// PreferredDERP is this node's preferred (home) DERP region ID.
+	// This is where the node expects to be contacted to begin a
+	// peer-to-peer connection. The node might be be temporarily
+	// connected to multiple DERP servers (to speak to other nodes
+	// that are located elsewhere) but PreferredDERP is the region ID
+	// that the node subscribes to traffic at.
 	// Zero means disconnected or unknown.
 	PreferredDERP int
 
@@ -1277,7 +1317,7 @@ type DNSConfig struct {
 	// match.
 	//
 	// Matches are case insensitive.
-	ExitNodeFilteredSet []string
+	ExitNodeFilteredSet []string `json:",omitempty"`
 }
 
 // DNSRecord is an extra DNS record to add to MagicDNS.
@@ -1609,8 +1649,15 @@ type ControlIPCandidate struct {
 	Priority int `json:",omitempty"`
 }
 
-// Debug are instructions from the control server to the client
-// to adjust debug settings.
+// Debug are instructions from the control server to the client to adjust debug
+// settings.
+//
+// Deprecated: these should no longer be used. They're a weird mix of declartive
+// and imperative. The imperative ones should be c2n requests instead, and the
+// declarative ones (at least the bools) should generally be self
+// Node.Capabilities.
+//
+// TODO(bradfitz): start migrating the imperative ones to c2n requests.
 type Debug struct {
 	// LogHeapPprof controls whether the client should log
 	// its heap pprof data. Each true value sent from the server
@@ -1845,11 +1892,8 @@ const (
 	// of connections to the default network interface on Darwin nodes.
 	CapabilityDebugDisableBindConnToInterface = "https://tailscale.com/cap/debug-disable-bind-conn-to-interface"
 
-	// CapabilityTailnetLockAlpha indicates the node is in the tailnet lock alpha,
-	// and initialization of tailnet lock may proceed.
-	//
-	// TODO(tom): Remove this for 1.35 and later.
-	CapabilityTailnetLockAlpha = "https://tailscale.com/cap/tailnet-lock-alpha"
+	// CapabilityTailnetLock indicates the node may initialize tailnet lock.
+	CapabilityTailnetLock = "https://tailscale.com/cap/tailnet-lock"
 
 	// Inter-node capabilities as specified in the MapResponse.PacketFilter[].CapGrants.
 

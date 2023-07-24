@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"golang.org/x/net/proxy"
+	"tailscale.com/cmd/testwrapper/flakytest"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/store/mem"
 	"tailscale.com/net/netns"
@@ -282,6 +283,7 @@ func TestConn(t *testing.T) {
 }
 
 func TestLoopbackLocalAPI(t *testing.T) {
+	flakytest.Mark(t, "https://github.com/tailscale/tailscale/issues/8557")
 	tstest.ResourceCheck(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -356,6 +358,7 @@ func TestLoopbackLocalAPI(t *testing.T) {
 }
 
 func TestLoopbackSOCKS5(t *testing.T) {
+	flakytest.Mark(t, "https://github.com/tailscale/tailscale/issues/8198")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

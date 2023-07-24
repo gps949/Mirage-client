@@ -20,7 +20,7 @@ import (
 	"tailscale.com/types/views"
 )
 
-//go:generate go run tailscale.com/cmd/cloner  -clonefunc=true -type=User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,DERPRegion,DERPMap,DERPNode,SSHRule,SSHAction,SSHPrincipal,ControlDialPlan,Location
+//go:generate go run tailscale.com/cmd/cloner  -clonefunc=true -type=User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,DERPHomeParams,DERPRegion,DERPMap,DERPNode,SSHRule,SSHAction,SSHPrincipal,ControlDialPlan,Location,UserProfile
 
 // View returns a readonly view of User.
 func (p *User) View() UserView {
@@ -168,7 +168,6 @@ func (v NodeView) Online() *bool {
 	return &x
 }
 
-func (v NodeView) KeepAlive() bool                   { return v.ж.KeepAlive }
 func (v NodeView) MachineAuthorized() bool           { return v.ж.MachineAuthorized }
 func (v NodeView) Capabilities() views.Slice[string] { return views.SliceOf(v.ж.Capabilities) }
 func (v NodeView) UnsignedPeerAPIOnly() bool         { return v.ж.UnsignedPeerAPIOnly }
@@ -210,7 +209,6 @@ var _NodeViewNeedsRegeneration = Node(struct {
 	PrimaryRoutes                 []netip.Prefix
 	LastSeen                      *time.Time
 	Online                        *bool
-	KeepAlive                     bool
 	MachineAuthorized             bool
 	Capabilities                  []string
 	UnsignedPeerAPIOnly           bool
@@ -635,6 +633,60 @@ var _RegisterResponseViewNeedsRegeneration = RegisterResponse(struct {
 	Error             string
 }{})
 
+// View returns a readonly view of DERPHomeParams.
+func (p *DERPHomeParams) View() DERPHomeParamsView {
+	return DERPHomeParamsView{ж: p}
+}
+
+// DERPHomeParamsView provides a read-only view over DERPHomeParams.
+//
+// Its methods should only be called if `Valid()` returns true.
+type DERPHomeParamsView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *DERPHomeParams
+}
+
+// Valid reports whether underlying value is non-nil.
+func (v DERPHomeParamsView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v DERPHomeParamsView) AsStruct() *DERPHomeParams {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+func (v DERPHomeParamsView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+
+func (v *DERPHomeParamsView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x DERPHomeParams
+	if err := json.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v DERPHomeParamsView) RegionScore() views.Map[int, float64] {
+	return views.MapOf(v.ж.RegionScore)
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _DERPHomeParamsViewNeedsRegeneration = DERPHomeParams(struct {
+	RegionScore map[int]float64
+}{})
+
 // View returns a readonly view of DERPRegion.
 func (p *DERPRegion) View() DERPRegionView {
 	return DERPRegionView{ж: p}
@@ -742,6 +794,8 @@ func (v *DERPMapView) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+func (v DERPMapView) HomeParams() DERPHomeParamsView { return v.ж.HomeParams.View() }
+
 func (v DERPMapView) Regions() views.MapFn[int, *DERPRegion, DERPRegionView] {
 	return views.MapFnOf(v.ж.Regions, func(t *DERPRegion) DERPRegionView {
 		return t.View()
@@ -751,6 +805,7 @@ func (v DERPMapView) OmitDefaultRegions() bool { return v.ж.OmitDefaultRegions 
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _DERPMapViewNeedsRegeneration = DERPMap(struct {
+	HomeParams         *DERPHomeParams
 	Regions            map[int]*DERPRegion
 	OmitDefaultRegions bool
 }{})
@@ -1145,4 +1200,67 @@ var _LocationViewNeedsRegeneration = Location(struct {
 	City        string
 	CityCode    string
 	Priority    int
+}{})
+
+// View returns a readonly view of UserProfile.
+func (p *UserProfile) View() UserProfileView {
+	return UserProfileView{ж: p}
+}
+
+// UserProfileView provides a read-only view over UserProfile.
+//
+// Its methods should only be called if `Valid()` returns true.
+type UserProfileView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *UserProfile
+}
+
+// Valid reports whether underlying value is non-nil.
+func (v UserProfileView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v UserProfileView) AsStruct() *UserProfile {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+func (v UserProfileView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+
+func (v *UserProfileView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x UserProfile
+	if err := json.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v UserProfileView) ID() UserID                    { return v.ж.ID }
+func (v UserProfileView) LoginName() string             { return v.ж.LoginName }
+func (v UserProfileView) DisplayName() string           { return v.ж.DisplayName }
+func (v UserProfileView) ProfilePicURL() string         { return v.ж.ProfilePicURL }
+func (v UserProfileView) Roles() emptyStructJSONSlice   { return v.ж.Roles }
+func (v UserProfileView) Groups() views.Slice[string]   { return views.SliceOf(v.ж.Groups) }
+func (v UserProfileView) Equal(v2 UserProfileView) bool { return v.ж.Equal(v2.ж) }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _UserProfileViewNeedsRegeneration = UserProfile(struct {
+	ID            UserID
+	LoginName     string
+	DisplayName   string
+	ProfilePicURL string
+	Roles         emptyStructJSONSlice
+	Groups        []string
 }{})
