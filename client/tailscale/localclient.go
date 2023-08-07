@@ -502,6 +502,18 @@ func (lc *LocalClient) status(ctx context.Context, queryString string) (*ipnstat
 	return decodeJSON[*ipnstate.Status](body)
 }
 
+func (lc *LocalClient) SetUploadLogs(ctx context.Context, enable bool) error {
+	_, err := lc.send(ctx, "PATCH", "/localapi/v0/upload-log?enable="+strconv.FormatBool(enable), http.StatusNoContent, nil)
+	return err
+}
+func (lc *LocalClient) IsUploadLog(ctx context.Context) (bool, error) {
+	body, err := lc.get200(ctx, "/localapi/v0/upload-log")
+	if err != nil {
+		return false, err
+	}
+	return string(body) == "true", nil
+}
+
 // IDToken is a request to get an OIDC ID token for an audience.
 // The token can be presented to any resource provider which offers OIDC
 // Federation.

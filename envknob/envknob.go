@@ -413,6 +413,11 @@ func SetNoLogsNoSupport() {
 	Setenv("TS_NO_LOGS_NO_SUPPORT", "true")
 }
 
+// RemoveNoLogsNoSupport disables no-logs-no-support mode.
+func RemoveNoLogsNoSupport() {
+	Setenv("TS_NO_LOGS_NO_SUPPORT", "false")
+}
+
 // notInInit is set true the first time we've seen a non-init stack trace.
 var notInInit atomic.Bool
 

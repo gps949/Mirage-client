@@ -85,6 +85,7 @@ var handler = map[string]localAPIHandler{
 	"set-state-store": (*Handler).serveSetStateStore,
 	// cgao6: 我们甚至还要加个读取用的
 	"get-state-store": (*Handler).serveGetStateStore,
+	"upload-log":      (*Handler).serveUploadLog,
 
 	"set-push-device-token":     (*Handler).serveSetPushDeviceToken,
 	"dial":                      (*Handler).serveDial,
@@ -640,6 +641,43 @@ func (h *Handler) serveGetStateStore(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write(value)
+}
+
+func (h *Handler) serveUploadLog(w http.ResponseWriter, r *http.Request) {
+	if !h.PermitWrite {
+		http.Error(w, "debug access denied", http.StatusForbidden)
+		return
+	}
+	if r.Method != "PATCH" {
+		if r.Method == "GET" {
+			enable := !envknob.NoLogsNoSupport()
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprintf(w, "%v\n", enable)
+			return
+		}
+		http.Error(w, "PATCH or GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	en := strings.TrimSpace(r.FormValue("enable"))
+	if len(en) == 0 {
+		http.Error(w, "no enable state requested", http.StatusBadRequest)
+		return
+	}
+	enable, err := strconv.ParseBool(en)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if enable {
+		envknob.RemoveNoLogsNoSupport()
+	} else {
+		envknob.SetNoLogsNoSupport()
+	}
+	if envknob.NoLogsNoSupport() != enable {
+		http.Error(w, "failed to set log state", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) serveDebugPacketFilterRules(w http.ResponseWriter, r *http.Request) {
