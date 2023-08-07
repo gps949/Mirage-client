@@ -19,10 +19,10 @@ import (
 
 var synologyPackageCenter bool
 
-func getTargets() ([]dist.Target, error) {
+func getTargets(signers unixpkgs.Signers) ([]dist.Target, error) {
 	var ret []dist.Target
 
-	ret = append(ret, unixpkgs.Targets()...)
+	ret = append(ret, unixpkgs.Targets(signers)...)
 	// Synology packages can be built either for sideloading, or for
 	// distribution by Synology in their package center. When
 	// distributed through the package center, apps can request

@@ -120,6 +120,7 @@ For help on subcommands, add --help after: "mirage status --help".
 			versionCmd,
 			//			bugReportCmd,
 			//			licensesCmd,
+			exitNodeCmd,
 		},
 		FlagSet:   rootfs,
 		Exec:      func(context.Context, []string) error { return flag.ErrHelp },
