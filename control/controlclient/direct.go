@@ -171,7 +171,7 @@ type ControlDialPlanner interface {
 // Pinger is the LocalBackend.Ping method.
 type Pinger interface {
 	// Ping is a request to do a ping with the peer handling the given IP.
-	Ping(ctx context.Context, ip netip.Addr, pingType tailcfg.PingType) (*ipnstate.PingResult, error)
+	Ping(ctx context.Context, ip netip.Addr, pingType tailcfg.PingType, size int) (*ipnstate.PingResult, error)
 }
 
 type Decompressor interface {
@@ -560,7 +560,7 @@ func (c *Direct) doLogin(ctx context.Context, opt loginOpt) (mustRegen bool, new
 		request.NodeKey.ShortString(), opt.URL != "", len(nodeKeySignature) > 0)
 	request.Auth.Oauth2Token = opt.Token
 	request.Auth.Provider = persist.Provider
-	request.Auth.LoginName = persist.LoginName
+	request.Auth.LoginName = persist.UserProfile.LoginName
 	request.Auth.AuthKey = authKey
 	err = signRegisterRequest(&request, c.serverURL, c.serverKey, machinePrivKey.Public())
 	if err != nil {
@@ -645,9 +645,6 @@ func (c *Direct) doLogin(ctx context.Context, opt loginOpt) (mustRegen bool, new
 	}
 	if resp.Login.Provider != "" {
 		persist.Provider = resp.Login.Provider
-	}
-	if resp.Login.LoginName != "" {
-		persist.LoginName = resp.Login.LoginName
 	}
 	persist.UserProfile = tailcfg.UserProfile{
 		ID:            resp.User.ID,
@@ -1132,8 +1129,17 @@ func (c *Direct) sendMapRequest(ctx context.Context, maxPolls int, readOnly bool
 			c.lastPrintMap = now
 			c.logf("[v1] new network map[%d]:\n%s", i, nm.VeryConcise())
 		}
+		newPersist := persist.AsStruct()
+		newPersist.NodeID = nm.SelfNode.StableID
+		newPersist.UserProfile = nm.UserProfiles[nm.User]
 
 		c.mu.Lock()
+		// If we are the ones who last updated persist, then we can update it
+		// again. Otherwise, we should not touch it.
+		if persist == c.persist {
+			c.persist = newPersist.View()
+			persist = c.persist
+		}
 		c.expiry = &nm.Expiry
 		c.mu.Unlock()
 
@@ -1671,7 +1677,7 @@ func doPingerPing(logf logger.Logf, c *http.Client, pr *tailcfg.PingRequest, pin
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	res, err := pinger.Ping(ctx, pr.IP, pingType)
+	res, err := pinger.Ping(ctx, pr.IP, pingType, 0)
 	if err != nil {
 		d := time.Since(start).Round(time.Millisecond)
 		logf("doPingerPing: ping error of type %q to %v after %v: %v", pingType, pr.IP, d, err)

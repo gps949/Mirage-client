@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -64,6 +65,7 @@ import (
 	"tailscale.com/types/dnstype"
 	"tailscale.com/types/empty"
 	"tailscale.com/types/key"
+	"tailscale.com/types/lazy"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/logid"
 	"tailscale.com/types/netmap"
@@ -90,6 +92,14 @@ import (
 	"tailscale.com/wgengine/wgcfg"
 	"tailscale.com/wgengine/wgcfg/nmcfg"
 )
+
+var lazyInTest lazy.SyncValue[bool]
+
+func inTest() bool {
+	return lazyInTest.Get(func() bool {
+		return flag.Lookup("test.v") != nil
+	})
+}
 
 var controlDebugFlags = getControlDebugFlags()
 
@@ -496,7 +506,7 @@ func (b *LocalBackend) maybePauseControlClientLocked() {
 		return
 	}
 	networkUp := b.prevIfState.AnyInterfaceUp()
-	b.cc.SetPaused((b.state == ipn.Stopped && b.netMap != nil) || !networkUp)
+	b.cc.SetPaused((b.state == ipn.Stopped && b.netMap != nil) || (!networkUp && !inTest()))
 }
 
 // linkChange is our network monitor callback, called whenever the network changes.
@@ -948,7 +958,7 @@ func (b *LocalBackend) setClientStatus(st controlclient.Status) {
 	b.mu.Lock()
 
 	if st.LogoutFinished != nil {
-		if p := b.pm.CurrentPrefs(); !p.Persist().Valid() || p.Persist().LoginName() == "" {
+		if p := b.pm.CurrentPrefs(); !p.Persist().Valid() || p.Persist().UserProfile().LoginName() == "" {
 			b.mu.Unlock()
 			return
 		}
@@ -1000,13 +1010,8 @@ func (b *LocalBackend) setClientStatus(st controlclient.Status) {
 	}
 
 	// Perform all mutations of prefs based on the netmap here.
-	if st.NetMap != nil {
-		if b.updatePersistFromNetMapLocked(st.NetMap, prefs) {
-			prefsChanged = true
-		}
-	}
-	// Prefs will be written out if stale; this is not safe unless locked or cloned.
 	if prefsChanged {
+		// Prefs will be written out if stale; this is not safe unless locked or cloned.
 		if err := b.pm.SetPrefs(prefs.View()); err != nil {
 			b.logf("Failed to save new controlclient state: %v", err)
 		}
@@ -2401,7 +2406,7 @@ func (b *LocalBackend) StartLoginInteractive() {
 	}
 }
 
-func (b *LocalBackend) Ping(ctx context.Context, ip netip.Addr, pingType tailcfg.PingType) (*ipnstate.PingResult, error) {
+func (b *LocalBackend) Ping(ctx context.Context, ip netip.Addr, pingType tailcfg.PingType, size int) (*ipnstate.PingResult, error) {
 	if pingType == tailcfg.PingPeerAPI {
 		t0 := b.clock.Now()
 		node, base, err := b.pingPeerAPI(ctx, ip)
@@ -2424,7 +2429,7 @@ func (b *LocalBackend) Ping(ctx context.Context, ip netip.Addr, pingType tailcfg
 		return pr, nil
 	}
 	ch := make(chan *ipnstate.PingResult, 1)
-	b.e.Ping(ip, pingType, func(pr *ipnstate.PingResult) {
+	b.e.Ping(ip, pingType, size, func(pr *ipnstate.PingResult) {
 		select {
 		case ch <- pr:
 		default:
@@ -2775,16 +2780,16 @@ func (b *LocalBackend) setPrefsLockedOnEntry(caller string, newp *ipn.Prefs) ipn
 		}
 	}
 	if netMap != nil {
-		up := netMap.UserProfiles[netMap.User]
-		if login := up.LoginName; login != "" {
-			if newp.Persist == nil {
-				b.logf("active login: %s", login)
+		newProfile := netMap.UserProfiles[netMap.User]
+		if newLoginName := newProfile.LoginName; newLoginName != "" {
+			if !oldp.Persist().Valid() {
+				b.logf("active login: %s", newLoginName)
 			} else {
-				if newp.Persist.LoginName != login {
-					b.logf("active login: %q (changed from %q)", login, newp.Persist.LoginName)
-					newp.Persist.LoginName = login
+				oldLoginName := oldp.Persist().UserProfile().LoginName()
+				if oldLoginName != newLoginName {
+					b.logf("active login: %q (changed from %q)", newLoginName, oldLoginName)
 				}
-				newp.Persist.UserProfile = up
+				newp.Persist.UserProfile = newProfile
 			}
 		}
 	}
@@ -3953,28 +3958,9 @@ func hasCapability(nm *netmap.NetworkMap, cap string) bool {
 	return false
 }
 
-func (b *LocalBackend) updatePersistFromNetMapLocked(nm *netmap.NetworkMap, prefs *ipn.Prefs) (changed bool) {
-	if nm == nil || nm.SelfNode == nil {
-		return
-	}
-	up := nm.UserProfiles[nm.User]
-	if prefs.Persist.UserProfile.ID != up.ID {
-		// If the current profile doesn't match the
-		// network map's user profile, then we need to
-		// update the persisted UserProfile to match.
-		prefs.Persist.UserProfile = up
-		changed = true
-	}
-	if prefs.Persist.NodeID == "" {
-		// If the current profile doesn't have a NodeID,
-		// then we need to update the persisted NodeID to
-		// match.
-		prefs.Persist.NodeID = nm.SelfNode.StableID
-		changed = true
-	}
-	return changed
-}
-
+// setNetMapLocked updates the LocalBackend state to reflect the newly
+// received nm. If nm is nil, it resets all configuration as though
+// Tailscale is turned off.
 func (b *LocalBackend) setNetMapLocked(nm *netmap.NetworkMap) {
 	b.dialer.SetNetMap(nm)
 	var login string
