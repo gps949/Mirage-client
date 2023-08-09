@@ -4836,7 +4836,7 @@ func (b *LocalBackend) SetStateStore(key, value string) error {
 	if b.store == nil {
 		return errors.New("no state store")
 	}
-	err := b.store.WriteState(ipn.StateKey(key), []byte(value))
+	err := ipn.WriteState(b.store, ipn.StateKey(key), []byte(value))
 	b.logf("SetStateStore(%q, %q) = %v", key, value, err)
 
 	if err != nil {
