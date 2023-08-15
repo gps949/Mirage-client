@@ -1,12 +1,15 @@
 // Copyright (c) Tailscale Inc & AUTHORS
 // SPDX-License-Identifier: BSD-3-Clause
 
-package cli
+package clientupdate
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"tailscale.com/tailcfg"
 )
 
 func TestUpdateDebianAptSourcesListBytes(t *testing.T) {
@@ -19,38 +22,38 @@ func TestUpdateDebianAptSourcesListBytes(t *testing.T) {
 	}{
 		{
 			name:    "stable-to-unstable",
-			toTrack: "unstable",
+			toTrack: UnstableTrack,
 			in:      "# Tailscale packages for debian buster\ndeb https://pkgs.tailscale.com/stable/debian bullseye main\n",
 			want:    "# Tailscale packages for debian buster\ndeb https://pkgs.tailscale.com/unstable/debian bullseye main\n",
 		},
 		{
 			name:    "stable-unchanged",
-			toTrack: "stable",
+			toTrack: StableTrack,
 			in:      "# Tailscale packages for debian buster\ndeb https://pkgs.tailscale.com/stable/debian bullseye main\n",
 		},
 		{
 			name:    "if-both-stable-and-unstable-dont-change",
-			toTrack: "stable",
+			toTrack: StableTrack,
 			in: "# Tailscale packages for debian buster\n" +
 				"deb https://pkgs.tailscale.com/stable/debian bullseye main\n" +
 				"deb https://pkgs.tailscale.com/unstable/debian bullseye main\n",
 		},
 		{
 			name:    "if-both-stable-and-unstable-dont-change-unstable",
-			toTrack: "unstable",
+			toTrack: UnstableTrack,
 			in: "# Tailscale packages for debian buster\n" +
 				"deb https://pkgs.tailscale.com/stable/debian bullseye main\n" +
 				"deb https://pkgs.tailscale.com/unstable/debian bullseye main\n",
 		},
 		{
 			name:    "signed-by-form",
-			toTrack: "unstable",
+			toTrack: UnstableTrack,
 			in:      "# Tailscale packages for ubuntu jammy\ndeb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu jammy main\n",
 			want:    "# Tailscale packages for ubuntu jammy\ndeb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/unstable/ubuntu jammy main\n",
 		},
 		{
 			name:    "unsupported-lines",
-			toTrack: "unstable",
+			toTrack: UnstableTrack,
 			in:      "# Tailscale packages for ubuntu jammy\ndeb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/foobar/ubuntu jammy main\n",
 			wantErr: "unexpected/unsupported /etc/apt/sources.list.d/tailscale.list contents",
 		},
@@ -279,7 +282,7 @@ repo_gpgcheck=1
 gpgcheck=0
 gpgkey=https://pkgs.tailscale.com/stable/fedora/repo.gpg
 `,
-			track: "stable",
+			track: StableTrack,
 			after: `
 [tailscale-stable]
 name=Tailscale stable
@@ -303,7 +306,7 @@ repo_gpgcheck=1
 gpgcheck=0
 gpgkey=https://pkgs.tailscale.com/stable/fedora/repo.gpg
 `,
-			track: "unstable",
+			track: UnstableTrack,
 			after: `
 [tailscale-unstable]
 name=Tailscale unstable
@@ -332,7 +335,7 @@ gpgcheck=1
 gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-$releasever-$basearch
 skip_if_unavailable=False
 `,
-			track:   "stable",
+			track:   StableTrack,
 			wantErr: true,
 		},
 	}
@@ -436,6 +439,47 @@ tailscale installed size:
 			}
 			if got != tt.want {
 				t.Fatalf("got version: %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSynoArch(t *testing.T) {
+	tests := []struct {
+		goarch  string
+		model   string
+		want    string
+		wantErr bool
+	}{
+		{goarch: "amd64", model: "DS224+", want: "x86_64"},
+		{goarch: "arm64", model: "DS124", want: "armv8"},
+		{goarch: "386", model: "DS415play", want: "i686"},
+		{goarch: "arm", model: "DS213air", want: "88f6281"},
+		{goarch: "arm", model: "NVR1218", want: "hi3535"},
+		{goarch: "arm", model: "DS1517", want: "alpine"},
+		{goarch: "arm", model: "DS216se", want: "armada370"},
+		{goarch: "arm", model: "DS115", want: "armada375"},
+		{goarch: "arm", model: "DS419slim", want: "armada38x"},
+		{goarch: "arm", model: "RS815", want: "armadaxp"},
+		{goarch: "arm", model: "DS414j", want: "comcerto2k"},
+		{goarch: "arm", model: "DS216play", want: "monaco"},
+		{goarch: "riscv64", model: "DS999", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s-%s", tt.goarch, tt.model), func(t *testing.T) {
+			got, err := synoArch(&tailcfg.Hostinfo{GoArch: tt.goarch, DeviceModel: tt.model})
+			if err != nil {
+				if !tt.wantErr {
+					t.Fatalf("got unexpected error %v", err)
+				}
+				return
+			}
+			if tt.wantErr {
+				t.Fatalf("got %q, expected an error", got)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
 	}
