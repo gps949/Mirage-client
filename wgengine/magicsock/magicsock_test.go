@@ -18,7 +18,6 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
-	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -32,8 +31,7 @@ import (
 	"github.com/tailscale/wireguard-go/device"
 	"github.com/tailscale/wireguard-go/tun/tuntest"
 	"go4.org/mem"
-	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
+	xmaps "golang.org/x/exp/maps"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -286,7 +284,7 @@ func meshStacks(logf logger.Logf, mutateNetmap func(idx int, nm *netmap.NetworkM
 				Endpoints:  epStrings(eps[i]),
 				DERP:       "127.3.3.40:1",
 			}
-			nm.Peers = append(nm.Peers, peer)
+			nm.Peers = append(nm.Peers, peer.View())
 		}
 
 		if mutateNetmap != nil {
@@ -306,7 +304,7 @@ func meshStacks(logf logger.Logf, mutateNetmap func(idx int, nm *netmap.NetworkM
 			m.conn.SetNetworkMap(nm)
 			peerSet := make(map[key.NodePublic]struct{}, len(nm.Peers))
 			for _, peer := range nm.Peers {
-				peerSet[peer.Key] = struct{}{}
+				peerSet[peer.Key()] = struct{}{}
 			}
 			m.conn.UpdatePeers(peerSet)
 			wg, err := nmcfg.WGCfg(nm, logf, netmap.AllowSingleHosts, "")
@@ -659,7 +657,9 @@ func TestDiscokeyChange(t *testing.T) {
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		nm.Peers[0].DiscoKey = m1DiscoKey
+		mut := nm.Peers[0].AsStruct()
+		mut.DiscoKey = m1DiscoKey
+		nm.Peers[0] = mut.View()
 	}
 
 	cleanupMesh := meshStacks(t.Logf, setm1Key, m1, m2)
@@ -1083,7 +1083,7 @@ func testTwoDevicePing(t *testing.T, d *devices) {
 			}
 		}
 		t.Helper()
-		t.Errorf("missing any connection to %s from %s", wantConns, maps.Keys(stats))
+		t.Errorf("missing any connection to %s from %s", wantConns, xmaps.Keys(stats))
 	}
 
 	addrPort := netip.MustParseAddrPort
@@ -1250,13 +1250,13 @@ func addTestEndpoint(tb testing.TB, conn *Conn, sendConn net.PacketConn) (key.No
 	discoKey := key.DiscoPublicFromRaw32(mem.B([]byte{31: 1}))
 	nodeKey := key.NodePublicFromRaw32(mem.B([]byte{0: 'N', 1: 'K', 31: 0}))
 	conn.SetNetworkMap(&netmap.NetworkMap{
-		Peers: []*tailcfg.Node{
+		Peers: nodeViews([]*tailcfg.Node{
 			{
 				Key:       nodeKey,
 				DiscoKey:  discoKey,
 				Endpoints: []string{sendConn.LocalAddr().String()},
 			},
-		},
+		}),
 	})
 	conn.SetPrivateKey(key.NodePrivateFromRaw32(mem.B([]byte{0: 1, 31: 0})))
 	_, err := conn.ParseEndpoint(nodeKey.UntypedHexString())
@@ -1429,6 +1429,14 @@ func BenchmarkReceiveFrom_Native(b *testing.B) {
 	}
 }
 
+func nodeViews(v []*tailcfg.Node) []tailcfg.NodeView {
+	nv := make([]tailcfg.NodeView, len(v))
+	for i, n := range v {
+		nv[i] = n.View()
+	}
+	return nv
+}
+
 // Test that a netmap update where node changes its node key but
 // doesn't change its disco key doesn't result in a broken state.
 //
@@ -1446,13 +1454,13 @@ func TestSetNetworkMapChangingNodeKey(t *testing.T) {
 	nodeKey2 := key.NodePublicFromRaw32(mem.B([]byte{0: 'N', 1: 'K', 2: '2', 31: 0}))
 
 	conn.SetNetworkMap(&netmap.NetworkMap{
-		Peers: []*tailcfg.Node{
+		Peers: nodeViews([]*tailcfg.Node{
 			{
 				Key:       nodeKey1,
 				DiscoKey:  discoKey,
 				Endpoints: []string{"192.168.1.2:345"},
 			},
-		},
+		}),
 	})
 	_, err := conn.ParseEndpoint(nodeKey1.UntypedHexString())
 	if err != nil {
@@ -1461,13 +1469,13 @@ func TestSetNetworkMapChangingNodeKey(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		conn.SetNetworkMap(&netmap.NetworkMap{
-			Peers: []*tailcfg.Node{
+			Peers: nodeViews([]*tailcfg.Node{
 				{
 					Key:       nodeKey2,
 					DiscoKey:  discoKey,
 					Endpoints: []string{"192.168.1.2:345"},
 				},
-			},
+			}),
 		})
 	}
 
@@ -1794,7 +1802,7 @@ func TestStressSetNetworkMap(t *testing.T) {
 		}
 		// Set the netmap.
 		conn.SetNetworkMap(&netmap.NetworkMap{
-			Peers: peers,
+			Peers: nodeViews(peers),
 		})
 		// Check invariants.
 		if err := conn.peerMap.validate(); err != nil {
@@ -2239,7 +2247,7 @@ func TestIsWireGuardOnlyPeer(t *testing.T) {
 		PrivateKey: m.privateKey,
 		NodeKey:    m.privateKey.Public(),
 		Addresses:  []netip.Prefix{tsaip},
-		Peers: []*tailcfg.Node{
+		Peers: nodeViews([]*tailcfg.Node{
 			{
 				Key:             wgkey.Public(),
 				Endpoints:       []string{wgEp.String()},
@@ -2247,7 +2255,7 @@ func TestIsWireGuardOnlyPeer(t *testing.T) {
 				Addresses:       []netip.Prefix{wgaip},
 				AllowedIPs:      []netip.Prefix{wgaip},
 			},
-		},
+		}),
 	}
 	m.conn.SetNetworkMap(nm)
 
@@ -2297,7 +2305,7 @@ func TestIsWireGuardOnlyPeerWithMasquerade(t *testing.T) {
 		PrivateKey: m.privateKey,
 		NodeKey:    m.privateKey.Public(),
 		Addresses:  []netip.Prefix{tsaip},
-		Peers: []*tailcfg.Node{
+		Peers: nodeViews([]*tailcfg.Node{
 			{
 				Key:                           wgkey.Public(),
 				Endpoints:                     []string{wgEp.String()},
@@ -2306,7 +2314,7 @@ func TestIsWireGuardOnlyPeerWithMasquerade(t *testing.T) {
 				AllowedIPs:                    []netip.Prefix{wgaip},
 				SelfNodeV4MasqAddrForThisPeer: ptr.To(masqip.Addr()),
 			},
-		},
+		}),
 	}
 	m.conn.SetNetworkMap(nm)
 
@@ -2338,116 +2346,6 @@ func TestIsWireGuardOnlyPeerWithMasquerade(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no packet after 1s")
-	}
-}
-
-func TestEndpointTracker(t *testing.T) {
-	local := tailcfg.Endpoint{
-		Addr: netip.MustParseAddrPort("192.168.1.1:12345"),
-		Type: tailcfg.EndpointLocal,
-	}
-
-	stun4_1 := tailcfg.Endpoint{
-		Addr: netip.MustParseAddrPort("1.2.3.4:12345"),
-		Type: tailcfg.EndpointSTUN,
-	}
-	stun4_2 := tailcfg.Endpoint{
-		Addr: netip.MustParseAddrPort("5.6.7.8:12345"),
-		Type: tailcfg.EndpointSTUN,
-	}
-
-	stun6_1 := tailcfg.Endpoint{
-		Addr: netip.MustParseAddrPort("[2a09:8280:1::1111]:12345"),
-		Type: tailcfg.EndpointSTUN,
-	}
-	stun6_2 := tailcfg.Endpoint{
-		Addr: netip.MustParseAddrPort("[2a09:8280:1::2222]:12345"),
-		Type: tailcfg.EndpointSTUN,
-	}
-
-	start := time.Unix(1681503440, 0)
-
-	steps := []struct {
-		name string
-		now  time.Time
-		eps  []tailcfg.Endpoint
-		want []tailcfg.Endpoint
-	}{
-		{
-			name: "initial endpoints",
-			now:  start,
-			eps:  []tailcfg.Endpoint{local, stun4_1, stun6_1},
-			want: []tailcfg.Endpoint{local, stun4_1, stun6_1},
-		},
-		{
-			name: "no change",
-			now:  start.Add(1 * time.Minute),
-			eps:  []tailcfg.Endpoint{local, stun4_1, stun6_1},
-			want: []tailcfg.Endpoint{local, stun4_1, stun6_1},
-		},
-		{
-			name: "missing stun4",
-			now:  start.Add(2 * time.Minute),
-			eps:  []tailcfg.Endpoint{local, stun6_1},
-			want: []tailcfg.Endpoint{local, stun4_1, stun6_1},
-		},
-		{
-			name: "missing stun6",
-			now:  start.Add(3 * time.Minute),
-			eps:  []tailcfg.Endpoint{local, stun4_1},
-			want: []tailcfg.Endpoint{local, stun4_1, stun6_1},
-		},
-		{
-			name: "multiple STUN addresses within timeout",
-			now:  start.Add(4 * time.Minute),
-			eps:  []tailcfg.Endpoint{local, stun4_2, stun6_2},
-			want: []tailcfg.Endpoint{local, stun4_1, stun4_2, stun6_1, stun6_2},
-		},
-		{
-			name: "endpoint extended",
-			now:  start.Add(3*time.Minute + endpointTrackerLifetime - 1),
-			eps:  []tailcfg.Endpoint{local},
-			want: []tailcfg.Endpoint{
-				local, stun4_2, stun6_2,
-				// stun4_1 had its lifetime extended by the
-				// "missing stun6" test above to that start
-				// time plus the lifetime, while stun6 should
-				// have expired a minute sooner. It should thus
-				// be in this returned list.
-				stun4_1,
-			},
-		},
-		{
-			name: "after timeout",
-			now:  start.Add(4*time.Minute + endpointTrackerLifetime + 1),
-			eps:  []tailcfg.Endpoint{local, stun4_2, stun6_2},
-			want: []tailcfg.Endpoint{local, stun4_2, stun6_2},
-		},
-		{
-			name: "after timeout still caches",
-			now:  start.Add(4*time.Minute + endpointTrackerLifetime + time.Minute),
-			eps:  []tailcfg.Endpoint{local},
-			want: []tailcfg.Endpoint{local, stun4_2, stun6_2},
-		},
-	}
-
-	var et endpointTracker
-	for _, tt := range steps {
-		t.Logf("STEP: %s", tt.name)
-
-		got := et.update(tt.now, tt.eps)
-
-		// Sort both arrays for comparison
-		slices.SortFunc(got, func(a, b tailcfg.Endpoint) int {
-			return strings.Compare(a.Addr.String(), b.Addr.String())
-		})
-		slices.SortFunc(tt.want, func(a, b tailcfg.Endpoint) int {
-			return strings.Compare(a.Addr.String(), b.Addr.String())
-		})
-
-		if !reflect.DeepEqual(got, tt.want) {
-			t.Errorf("endpoints mismatch\ngot: %+v\nwant: %+v", got, tt.want)
-		}
 	}
 }
 
@@ -2533,7 +2431,7 @@ func TestIsWireGuardOnlyPickEndpointByPing(t *testing.T) {
 		PrivateKey: m.privateKey,
 		NodeKey:    m.privateKey.Public(),
 		Addresses:  []netip.Prefix{tsaip},
-		Peers: []*tailcfg.Node{
+		Peers: nodeViews([]*tailcfg.Node{
 			{
 				Key:             wgkey.Public(),
 				Endpoints:       []string{wgEp.String(), wgEp2.String(), wgEpV6.String()},
@@ -2541,7 +2439,7 @@ func TestIsWireGuardOnlyPickEndpointByPing(t *testing.T) {
 				Addresses:       []netip.Prefix{wgaip},
 				AllowedIPs:      []netip.Prefix{wgaip},
 			},
-		},
+		}),
 	}
 
 	applyNetworkMap(t, m, nm)

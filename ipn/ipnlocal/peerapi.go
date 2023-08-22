@@ -22,6 +22,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,7 +33,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/kortschak/wol"
-	"golang.org/x/exp/slices"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http/httpguts"
 	"tailscale.com/client/tailscale/apitype"
@@ -47,6 +47,7 @@ import (
 	"tailscale.com/net/netutil"
 	"tailscale.com/net/sockstats"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/views"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/multierr"
 	"tailscale.com/version/distro"
@@ -569,14 +570,14 @@ func (pln *peerAPIListener) ServeConn(src netip.AddrPort, c net.Conn) {
 		return
 	}
 	nm := pln.lb.NetMap()
-	if nm == nil || nm.SelfNode == nil {
+	if nm == nil || !nm.SelfNode.Valid() {
 		logf("peerapi: no netmap")
 		c.Close()
 		return
 	}
 	h := &peerAPIHandler{
 		ps:         pln.ps,
-		isSelf:     nm.SelfNode.User == peerNode.User,
+		isSelf:     nm.SelfNode.User() == peerNode.User(),
 		remoteAddr: src,
 		selfNode:   nm.SelfNode,
 		peerNode:   peerNode,
@@ -596,8 +597,8 @@ type peerAPIHandler struct {
 	ps         *peerAPIServer
 	remoteAddr netip.AddrPort
 	isSelf     bool                // whether peerNode is owned by same user as this node
-	selfNode   *tailcfg.Node       // this node; always non-nil
-	peerNode   *tailcfg.Node       // peerNode is who's making the request
+	selfNode   tailcfg.NodeView    // this node; always non-nil
+	peerNode   tailcfg.NodeView    // peerNode is who's making the request
 	peerUser   tailcfg.UserProfile // profile of peerNode
 }
 
@@ -608,11 +609,11 @@ func (h *peerAPIHandler) logf(format string, a ...any) {
 // isAddressValid reports whether addr is a valid destination address for this
 // node originating from the peer.
 func (h *peerAPIHandler) isAddressValid(addr netip.Addr) bool {
-	if h.peerNode.SelfNodeV4MasqAddrForThisPeer != nil {
-		return *h.peerNode.SelfNodeV4MasqAddrForThisPeer == addr
+	if v := h.peerNode.SelfNodeV4MasqAddrForThisPeer(); v != nil {
+		return *v == addr
 	}
 	pfx := netip.PrefixFrom(addr, addr.BitLen())
-	return slices.Contains(h.selfNode.Addresses, pfx)
+	return views.SliceContains(h.selfNode.Addresses(), pfx)
 }
 
 func (h *peerAPIHandler) validateHost(r *http.Request) error {
@@ -733,7 +734,7 @@ func (h *peerAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 <body>
 <h1>Hello, %s (%v)</h1>
 This is my Tailscale device. Your device is %v.
-`, html.EscapeString(who), h.remoteAddr.Addr(), html.EscapeString(h.peerNode.ComputedName))
+`, html.EscapeString(who), h.remoteAddr.Addr(), html.EscapeString(h.peerNode.ComputedName()))
 
 	if h.isSelf {
 		fmt.Fprintf(w, "<p>You are the owner of this node.\n")
@@ -1024,7 +1025,7 @@ func (f *incomingFile) PartialFile() ipn.PartialFile {
 
 // canPutFile reports whether h can put a file ("Taildrop") to this node.
 func (h *peerAPIHandler) canPutFile() bool {
-	if h.peerNode.UnsignedPeerAPIOnly {
+	if h.peerNode.UnsignedPeerAPIOnly() {
 		// Unsigned peers can't send files.
 		return false
 	}
@@ -1034,11 +1035,11 @@ func (h *peerAPIHandler) canPutFile() bool {
 // canDebug reports whether h can debug this node (goroutines, metrics,
 // magicsock internal state, etc).
 func (h *peerAPIHandler) canDebug() bool {
-	if !slices.Contains(h.selfNode.Capabilities, tailcfg.CapabilityDebug) {
+	if !views.SliceContains(h.selfNode.Capabilities(), tailcfg.CapabilityDebug) {
 		// This node does not expose debug info.
 		return false
 	}
-	if h.peerNode.UnsignedPeerAPIOnly {
+	if h.peerNode.UnsignedPeerAPIOnly() {
 		// Unsigned peers can't debug.
 		return false
 	}
@@ -1047,7 +1048,7 @@ func (h *peerAPIHandler) canDebug() bool {
 
 // canWakeOnLAN reports whether h can send a Wake-on-LAN packet from this node.
 func (h *peerAPIHandler) canWakeOnLAN() bool {
-	if h.peerNode.UnsignedPeerAPIOnly {
+	if h.peerNode.UnsignedPeerAPIOnly() {
 		return false
 	}
 	return h.isSelf || h.peerHasCap(tailcfg.PeerCapabilityWakeOnLAN)

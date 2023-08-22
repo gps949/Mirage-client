@@ -8,9 +8,9 @@ package logknob
 import (
 	"sync/atomic"
 
-	"golang.org/x/exp/slices"
 	"tailscale.com/envknob"
 	"tailscale.com/types/logger"
+	"tailscale.com/types/views"
 )
 
 // TODO(andrew-d): should we have a package-global registry of logknobs? It
@@ -58,7 +58,7 @@ func (lk *LogKnob) Set(v bool) {
 // about; we use this rather than a concrete type to avoid a circular
 // dependency.
 type NetMap interface {
-	SelfCapabilities() []string
+	SelfCapabilities() views.Slice[string]
 }
 
 // UpdateFromNetMap will enable logging if the SelfNode in the provided NetMap
@@ -68,7 +68,7 @@ func (lk *LogKnob) UpdateFromNetMap(nm NetMap) {
 		return
 	}
 
-	lk.cap.Store(slices.Contains(nm.SelfCapabilities(), lk.capName))
+	lk.cap.Store(views.SliceContains(nm.SelfCapabilities(), lk.capName))
 }
 
 // Do will call log with the provided format and arguments if any of the

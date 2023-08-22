@@ -84,6 +84,14 @@ func TestNoteReceiveActivity(t *testing.T) {
 	}
 }
 
+func nodeViews(v []*tailcfg.Node) []tailcfg.NodeView {
+	nv := make([]tailcfg.NodeView, len(v))
+	for i, n := range v {
+		nv[i] = n.View()
+	}
+	return nv
+}
+
 func TestUserspaceEngineReconfig(t *testing.T) {
 	e, err := NewFakeUserspaceEngine(t.Logf, 0)
 	if err != nil {
@@ -99,11 +107,11 @@ func TestUserspaceEngineReconfig(t *testing.T) {
 		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	} {
 		nm := &netmap.NetworkMap{
-			Peers: []*tailcfg.Node{
+			Peers: nodeViews([]*tailcfg.Node{
 				{
 					Key: nkFromHex(nodeHex),
 				},
-			},
+			}),
 		}
 		nk, err := key.ParseNodePublicUntyped(mem.S(nodeHex))
 		if err != nil {
@@ -121,7 +129,7 @@ func TestUserspaceEngineReconfig(t *testing.T) {
 		}
 
 		e.SetNetworkMap(nm)
-		err = e.Reconfig(cfg, routerCfg, &dns.Config{}, nil)
+		err = e.Reconfig(cfg, routerCfg, &dns.Config{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -143,6 +151,8 @@ func TestUserspaceEngineReconfig(t *testing.T) {
 }
 
 func TestUserspaceEnginePortReconfig(t *testing.T) {
+	tstest.Replace(t, &randomizeClientPort, func() bool { return false })
+
 	flakytest.Mark(t, "https://github.com/tailscale/tailscale/issues/2855")
 	const defaultPort = 49983
 	// Keep making a wgengine until we find an unused port
@@ -181,13 +191,15 @@ func TestUserspaceEnginePortReconfig(t *testing.T) {
 		},
 	}
 	routerCfg := &router.Config{}
-	if err := ue.Reconfig(cfg, routerCfg, &dns.Config{}, nil); err != nil {
+	if err := ue.Reconfig(cfg, routerCfg, &dns.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := ue.magicConn.LocalPort(); got != startingPort {
 		t.Errorf("no debug setting changed local port to %d from %d", got, startingPort)
 	}
-	if err := ue.Reconfig(cfg, routerCfg, &dns.Config{}, &tailcfg.Debug{RandomizeClientPort: true}); err != nil {
+
+	randomizeClientPort = func() bool { return true }
+	if err := ue.Reconfig(cfg, routerCfg, &dns.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := ue.magicConn.LocalPort(); got == startingPort {
@@ -195,7 +207,8 @@ func TestUserspaceEnginePortReconfig(t *testing.T) {
 	}
 
 	lastPort := ue.magicConn.LocalPort()
-	if err := ue.Reconfig(cfg, routerCfg, &dns.Config{}, nil); err != nil {
+	randomizeClientPort = func() bool { return false }
+	if err := ue.Reconfig(cfg, routerCfg, &dns.Config{}); err != nil {
 		t.Fatal(err)
 	}
 	if startingPort == defaultPort {

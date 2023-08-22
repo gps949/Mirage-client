@@ -4,10 +4,13 @@
 package controlclient
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,7 +20,6 @@ import (
 	"tailscale.com/tstime"
 	"tailscale.com/types/key"
 	"tailscale.com/types/netmap"
-	"tailscale.com/types/opt"
 	"tailscale.com/types/ptr"
 	"tailscale.com/util/must"
 )
@@ -331,8 +333,9 @@ func formatNodes(nodes []*tailcfg.Node) string {
 	return sb.String()
 }
 
-func newTestMapSession(t *testing.T) *mapSession {
-	ms := newMapSession(key.NewNode())
+func newTestMapSession(t testing.TB, nu NetmapUpdater) *mapSession {
+	ms := newMapSession(key.NewNode(), nu)
+	t.Cleanup(ms.Close)
 	ms.logf = t.Logf
 	return ms
 }
@@ -347,7 +350,7 @@ func TestNetmapForResponse(t *testing.T) {
 				},
 			},
 		}
-		ms := newTestMapSession(t)
+		ms := newTestMapSession(t, nil)
 		nm1 := ms.netmapForResponse(&tailcfg.MapResponse{
 			Node:         new(tailcfg.Node),
 			PacketFilter: somePacketFilter,
@@ -368,7 +371,7 @@ func TestNetmapForResponse(t *testing.T) {
 	})
 	t.Run("implicit_dnsconfig", func(t *testing.T) {
 		someDNSConfig := &tailcfg.DNSConfig{Domains: []string{"foo", "bar"}}
-		ms := newTestMapSession(t)
+		ms := newTestMapSession(t, nil)
 		nm1 := ms.netmapForResponse(&tailcfg.MapResponse{
 			Node:      new(tailcfg.Node),
 			DNSConfig: someDNSConfig,
@@ -385,7 +388,7 @@ func TestNetmapForResponse(t *testing.T) {
 		}
 	})
 	t.Run("collect_services", func(t *testing.T) {
-		ms := newTestMapSession(t)
+		ms := newTestMapSession(t, nil)
 		var nm *netmap.NetworkMap
 		wantCollect := func(v bool) {
 			t.Helper()
@@ -418,7 +421,7 @@ func TestNetmapForResponse(t *testing.T) {
 		wantCollect(true)
 	})
 	t.Run("implicit_domain", func(t *testing.T) {
-		ms := newTestMapSession(t)
+		ms := newTestMapSession(t, nil)
 		var nm *netmap.NetworkMap
 		want := func(v string) {
 			t.Helper()
@@ -441,17 +444,18 @@ func TestNetmapForResponse(t *testing.T) {
 		someNode := &tailcfg.Node{
 			Name: "foo",
 		}
-		wantNode := &tailcfg.Node{
+		wantNode := (&tailcfg.Node{
 			Name:                 "foo",
 			ComputedName:         "foo",
 			ComputedNameWithHost: "foo",
-		}
-		ms := newTestMapSession(t)
-
-		nm1 := ms.netmapForResponse(&tailcfg.MapResponse{
+		}).View()
+		ms := newTestMapSession(t, nil)
+		mapRes := &tailcfg.MapResponse{
 			Node: someNode,
-		})
-		if nm1.SelfNode == nil {
+		}
+		initDisplayNames(mapRes.Node.View(), mapRes)
+		nm1 := ms.netmapForResponse(mapRes)
+		if !nm1.SelfNode.Valid() {
 			t.Fatal("nil Node in 1st netmap")
 		}
 		if !reflect.DeepEqual(nm1.SelfNode, wantNode) {
@@ -460,7 +464,7 @@ func TestNetmapForResponse(t *testing.T) {
 		}
 
 		nm2 := ms.netmapForResponse(&tailcfg.MapResponse{})
-		if nm2.SelfNode == nil {
+		if !nm2.SelfNode.Valid() {
 			t.Fatal("nil Node in 1st netmap")
 		}
 		if !reflect.DeepEqual(nm2.SelfNode, wantNode) {
@@ -468,155 +472,6 @@ func TestNetmapForResponse(t *testing.T) {
 			t.Errorf("Node mismatch in 2nd netmap; got: %s", j)
 		}
 	})
-}
-
-// TestDeltaDebug tests that tailcfg.Debug values can be omitted in MapResponses
-// entirely or have their opt.Bool values unspecified between MapResponses in a
-// session and that should mean no change. (as of capver 37). But two Debug
-// fields existed prior to capver 37 that weren't opt.Bool; we test that we both
-// still accept the non-opt.Bool form from control for RandomizeClientPort and
-// ForceBackgroundSTUN and also accept the new form, keeping the old form in
-// sync.
-func TestDeltaDebug(t *testing.T) {
-	type step struct {
-		got  *tailcfg.Debug
-		want *tailcfg.Debug
-	}
-	tests := []struct {
-		name  string
-		steps []step
-	}{
-		{
-			name: "nothing-to-nothing",
-			steps: []step{
-				{nil, nil},
-				{nil, nil},
-			},
-		},
-		{
-			name: "sticky-with-old-style-randomize-client-port",
-			steps: []step{
-				{
-					&tailcfg.Debug{RandomizeClientPort: true},
-					&tailcfg.Debug{
-						RandomizeClientPort:    true,
-						SetRandomizeClientPort: "true",
-					},
-				},
-				{
-					nil, // not sent by server
-					&tailcfg.Debug{
-						RandomizeClientPort:    true,
-						SetRandomizeClientPort: "true",
-					},
-				},
-			},
-		},
-		{
-			name: "sticky-with-new-style-randomize-client-port",
-			steps: []step{
-				{
-					&tailcfg.Debug{SetRandomizeClientPort: "true"},
-					&tailcfg.Debug{
-						RandomizeClientPort:    true,
-						SetRandomizeClientPort: "true",
-					},
-				},
-				{
-					nil, // not sent by server
-					&tailcfg.Debug{
-						RandomizeClientPort:    true,
-						SetRandomizeClientPort: "true",
-					},
-				},
-			},
-		},
-		{
-			name: "opt-bool-sticky-changing-over-time",
-			steps: []step{
-				{nil, nil},
-				{nil, nil},
-				{
-					&tailcfg.Debug{OneCGNATRoute: "true"},
-					&tailcfg.Debug{OneCGNATRoute: "true"},
-				},
-				{
-					nil,
-					&tailcfg.Debug{OneCGNATRoute: "true"},
-				},
-				{
-					&tailcfg.Debug{OneCGNATRoute: "false"},
-					&tailcfg.Debug{OneCGNATRoute: "false"},
-				},
-				{
-					nil,
-					&tailcfg.Debug{OneCGNATRoute: "false"},
-				},
-			},
-		},
-		{
-			name: "legacy-ForceBackgroundSTUN",
-			steps: []step{
-				{
-					&tailcfg.Debug{ForceBackgroundSTUN: true},
-					&tailcfg.Debug{ForceBackgroundSTUN: true, SetForceBackgroundSTUN: "true"},
-				},
-			},
-		},
-		{
-			name: "opt-bool-SetForceBackgroundSTUN",
-			steps: []step{
-				{
-					&tailcfg.Debug{SetForceBackgroundSTUN: "true"},
-					&tailcfg.Debug{ForceBackgroundSTUN: true, SetForceBackgroundSTUN: "true"},
-				},
-			},
-		},
-		{
-			name: "server-reset-to-default",
-			steps: []step{
-				{
-					&tailcfg.Debug{SetForceBackgroundSTUN: "true"},
-					&tailcfg.Debug{ForceBackgroundSTUN: true, SetForceBackgroundSTUN: "true"},
-				},
-				{
-					&tailcfg.Debug{SetForceBackgroundSTUN: "unset"},
-					&tailcfg.Debug{ForceBackgroundSTUN: false, SetForceBackgroundSTUN: "unset"},
-				},
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ms := newTestMapSession(t)
-			for stepi, s := range tt.steps {
-				nm := ms.netmapForResponse(&tailcfg.MapResponse{Debug: s.got})
-				if !reflect.DeepEqual(nm.Debug, s.want) {
-					t.Errorf("unexpected result at step index %v; got: %s", stepi, must.Get(json.Marshal(nm.Debug)))
-				}
-			}
-		})
-	}
-}
-
-// Verifies that copyDebugOptBools doesn't missing any opt.Bools.
-func TestCopyDebugOptBools(t *testing.T) {
-	rt := reflect.TypeOf(tailcfg.Debug{})
-	for i := 0; i < rt.NumField(); i++ {
-		sf := rt.Field(i)
-		if sf.Type != reflect.TypeOf(opt.Bool("")) {
-			continue
-		}
-		var src, dst tailcfg.Debug
-		reflect.ValueOf(&src).Elem().Field(i).Set(reflect.ValueOf(opt.Bool("true")))
-		if src == (tailcfg.Debug{}) {
-			t.Fatalf("failed to set field %v", sf.Name)
-		}
-		copyDebugOptBools(&dst, &src)
-		if src != dst {
-			t.Fatalf("copyDebugOptBools didn't copy field %v", sf.Name)
-		}
-	}
 }
 
 func TestDeltaDERPMap(t *testing.T) {
@@ -713,7 +568,7 @@ func TestDeltaDERPMap(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ms := newTestMapSession(t)
+			ms := newTestMapSession(t, nil)
 			for stepi, s := range tt.steps {
 				nm := ms.netmapForResponse(&tailcfg.MapResponse{DERPMap: s.got})
 				if !reflect.DeepEqual(nm.DERPMap, s.want) {
@@ -722,4 +577,65 @@ func TestDeltaDERPMap(t *testing.T) {
 			}
 		})
 	}
+}
+
+type countingNetmapUpdater struct {
+	full atomic.Int64
+}
+
+func (nu *countingNetmapUpdater) UpdateFullNetmap(nm *netmap.NetworkMap) {
+	nu.full.Add(1)
+}
+
+func BenchmarkMapSessionDelta(b *testing.B) {
+	for _, size := range []int{10, 100, 1_000, 10_000} {
+		b.Run(fmt.Sprintf("size_%d", size), func(b *testing.B) {
+			ctx := context.Background()
+			nu := &countingNetmapUpdater{}
+			ms := newTestMapSession(b, nu)
+			res := &tailcfg.MapResponse{
+				Node: &tailcfg.Node{
+					ID:   1,
+					Name: "foo.bar.ts.net.",
+				},
+			}
+			for i := 0; i < size; i++ {
+				res.Peers = append(res.Peers, &tailcfg.Node{
+					ID:         tailcfg.NodeID(i + 2),
+					Name:       fmt.Sprintf("peer%d.bar.ts.net.", i),
+					DERP:       "127.3.3.40:10",
+					Addresses:  []netip.Prefix{netip.MustParsePrefix("100.100.2.3/32"), netip.MustParsePrefix("fd7a:115c:a1e0::123/128")},
+					AllowedIPs: []netip.Prefix{netip.MustParsePrefix("100.100.2.3/32"), netip.MustParsePrefix("fd7a:115c:a1e0::123/128")},
+					Endpoints:  []string{"192.168.1.2:345", "192.168.1.3:678"},
+					Hostinfo: (&tailcfg.Hostinfo{
+						OS:       "fooOS",
+						Hostname: "MyHostname",
+						Services: []tailcfg.Service{
+							{Proto: "peerapi4", Port: 1234},
+							{Proto: "peerapi6", Port: 1234},
+							{Proto: "peerapi-dns-proxy", Port: 1},
+						},
+					}).View(),
+					LastSeen: ptr.To(time.Unix(int64(i), 0)),
+				})
+			}
+			ms.HandleNonKeepAliveMapResponse(ctx, res)
+
+			b.ResetTimer()
+			b.ReportAllocs()
+
+			// Now for the core of the benchmark loop, just toggle
+			// a single node's online status.
+			for i := 0; i < b.N; i++ {
+				if err := ms.HandleNonKeepAliveMapResponse(ctx, &tailcfg.MapResponse{
+					OnlineChange: map[tailcfg.NodeID]bool{
+						2: i%2 == 0,
+					},
+				}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+
 }

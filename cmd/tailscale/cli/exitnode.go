@@ -8,14 +8,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-
 	"os"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
-	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
+	xmaps "golang.org/x/exp/maps"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tailcfg"
 	"tailscale.com/util/cmpx"
@@ -66,7 +65,7 @@ func runExitNodeList(ctx context.Context, args []string) error {
 	var peers []*ipnstate.PeerStatus
 	for _, ps := range st.Peer {
 		if !ps.ExitNodeOption {
-			// We only show location based exit nodes.
+			// We only show exit nodes under the exit-node subcommand.
 			continue
 		}
 
@@ -182,7 +181,7 @@ func filterFormatAndSortExitNodes(peers []*ipnstate.PeerStatus, filterBy string)
 	}
 
 	filteredExitNodes := filteredExitNodes{
-		Countries: maps.Values(countries),
+		Countries: xmaps.Values(countries),
 	}
 
 	for _, country := range filteredExitNodes.Countries {

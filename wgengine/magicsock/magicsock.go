@@ -13,7 +13,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -50,10 +49,10 @@ import (
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
 	"tailscale.com/types/nettype"
+	"tailscale.com/types/views"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/mak"
 	"tailscale.com/util/ringbuffer"
-	"tailscale.com/util/set"
 	"tailscale.com/util/uniq"
 	"tailscale.com/version"
 	"tailscale.com/wgengine/capture"
@@ -641,6 +640,7 @@ func (c *Conn) updateNetInfo(ctx context.Context) (*netcheck.Report, error) {
 	if !c.setNearestDERP(ni.PreferredDERP) {
 		ni.PreferredDERP = 0
 	}
+	ni.FirewallMode = hostinfo.FirewallMode()
 
 	c.callNetInfoCallback(ni)
 	return report, nil
@@ -711,7 +711,7 @@ func (c *Conn) LastRecvActivityOfNodeKey(nk key.NodePublic) string {
 }
 
 // Ping handles a "tailscale ping" CLI query.
-func (c *Conn) Ping(peer *tailcfg.Node, res *ipnstate.PingResult, size int, cb func(*ipnstate.PingResult)) {
+func (c *Conn) Ping(peer tailcfg.NodeView, res *ipnstate.PingResult, size int, cb func(*ipnstate.PingResult)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.privateKey.IsZero() {
@@ -719,17 +719,17 @@ func (c *Conn) Ping(peer *tailcfg.Node, res *ipnstate.PingResult, size int, cb f
 		cb(res)
 		return
 	}
-	if len(peer.Addresses) > 0 {
-		res.NodeIP = peer.Addresses[0].Addr().String()
+	if peer.Addresses().Len() > 0 {
+		res.NodeIP = peer.Addresses().At(0).Addr().String()
 	}
-	res.NodeName = peer.Name // prefer DNS name
+	res.NodeName = peer.Name() // prefer DNS name
 	if res.NodeName == "" {
-		res.NodeName = peer.Hostinfo.Hostname() // else hostname
+		res.NodeName = peer.Hostinfo().Hostname() // else hostname
 	} else {
 		res.NodeName, _, _ = strings.Cut(res.NodeName, ".")
 	}
 
-	ep, ok := c.peerMap.endpointForNodeKey(peer.Key)
+	ep, ok := c.peerMap.endpointForNodeKey(peer.Key())
 	if !ok {
 		res.Err = "unknown peer"
 		cb(res)
@@ -753,13 +753,13 @@ func (c *Conn) populateCLIPingResponseLocked(res *ipnstate.PingResult, latency t
 // GetEndpointChanges returns the most recent changes for a particular
 // endpoint. The returned EndpointChange structs are for debug use only and
 // there are no guarantees about order, size, or content.
-func (c *Conn) GetEndpointChanges(peer *tailcfg.Node) ([]EndpointChange, error) {
+func (c *Conn) GetEndpointChanges(peer tailcfg.NodeView) ([]EndpointChange, error) {
 	c.mu.Lock()
 	if c.privateKey.IsZero() {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("tailscaled stopped")
 	}
-	ep, ok := c.peerMap.endpointForNodeKey(peer.Key)
+	ep, ok := c.peerMap.endpointForNodeKey(peer.Key())
 	c.mu.Unlock()
 
 	if !ok {
@@ -1270,7 +1270,7 @@ func (c *Conn) sendDiscoMessage(dst netip.AddrPort, dstKey key.NodePublic, dstDi
 		// Can't send. (e.g. no IPv6 locally)
 	} else {
 		if !c.networkDown() {
-			c.logf("magicsock: disco: failed to send %T to %v: %v", m, dst, err)
+			c.logf("magicsock: disco: failed to send %v to %v: %v", disco.MessageSummary(m), dst, err)
 		}
 	}
 	return sent, err
@@ -1729,7 +1729,7 @@ func (c *Conn) UpdatePeers(newPeers map[key.NodePublic]struct{}) {
 	}
 }
 
-func nodesEqual(x, y []*tailcfg.Node) bool {
+func nodesEqual(x, y []tailcfg.NodeView) bool {
 	if len(x) != len(y) {
 		return false
 	}
@@ -1755,17 +1755,12 @@ func (c *Conn) SetNetworkMap(nm *netmap.NetworkMap) {
 	}
 
 	priorNetmap := c.netMap
-	var priorDebug *tailcfg.Debug
-	if priorNetmap != nil {
-		priorDebug = priorNetmap.Debug
-	}
-	debugChanged := !reflect.DeepEqual(priorDebug, nm.Debug)
 	metricNumPeers.Set(int64(len(nm.Peers)))
 
 	// Update c.netMap regardless, before the following early return.
 	c.netMap = nm
 
-	if priorNetmap != nil && nodesEqual(priorNetmap.Peers, nm.Peers) && !debugChanged {
+	if priorNetmap != nil && nodesEqual(priorNetmap.Peers, nm.Peers) {
 		// The rest of this function is all adjusting state for peers that have
 		// changed. But if the set of peers is equal and the debug flags (for
 		// silent disco) haven't changed, no need to do anything else.
@@ -1773,7 +1768,7 @@ func (c *Conn) SetNetworkMap(nm *netmap.NetworkMap) {
 	}
 
 	c.logf("[v1] magicsock: got updated network map; %d peers", len(nm.Peers))
-	heartbeatDisabled := debugEnableSilentDisco() || (c.netMap != nil && c.netMap.Debug != nil && c.netMap.Debug.EnableSilentDisco)
+	heartbeatDisabled := debugEnableSilentDisco()
 
 	// Set a maximum size for our set of endpoint ring buffers by assuming
 	// that a single large update is ~500 bytes, and that we want to not
@@ -1805,8 +1800,8 @@ func (c *Conn) SetNetworkMap(nm *netmap.NetworkMap) {
 	// we'll fall through to the next pass, which allocates but can
 	// handle full set updates.
 	for _, n := range nm.Peers {
-		if ep, ok := c.peerMap.endpointForNodeKey(n.Key); ok {
-			if n.DiscoKey.IsZero() && !n.IsWireGuardOnly {
+		if ep, ok := c.peerMap.endpointForNodeKey(n.Key()); ok {
+			if n.DiscoKey().IsZero() && !n.IsWireGuardOnly() {
 				// Discokey transitioned from non-zero to zero? This should not
 				// happen in the wild, however it could mean:
 				// 1. A node was downgraded from post 0.100 to pre 0.100.
@@ -1825,7 +1820,7 @@ func (c *Conn) SetNetworkMap(nm *netmap.NetworkMap) {
 			c.peerMap.upsertEndpoint(ep, oldDiscoKey) // maybe update discokey mappings in peerMap
 			continue
 		}
-		if n.DiscoKey.IsZero() && !n.IsWireGuardOnly {
+		if n.DiscoKey().IsZero() && !n.IsWireGuardOnly() {
 			// Ancient pre-0.100 node, which does not have a disco key, and will only be reachable via DERP.
 			continue
 		}
@@ -1833,30 +1828,30 @@ func (c *Conn) SetNetworkMap(nm *netmap.NetworkMap) {
 		ep := &endpoint{
 			c:                 c,
 			debugUpdates:      ringbuffer.New[EndpointChange](entriesPerBuffer),
-			publicKey:         n.Key,
-			publicKeyHex:      n.Key.UntypedHexString(),
+			publicKey:         n.Key(),
+			publicKeyHex:      n.Key().UntypedHexString(),
 			sentPing:          map[stun.TxID]sentPing{},
 			endpointState:     map[netip.AddrPort]*endpointState{},
 			heartbeatDisabled: heartbeatDisabled,
-			isWireguardOnly:   n.IsWireGuardOnly,
+			isWireguardOnly:   n.IsWireGuardOnly(),
 		}
-		if len(n.Addresses) > 0 {
-			ep.nodeAddr = n.Addresses[0].Addr()
+		if n.Addresses().Len() > 0 {
+			ep.nodeAddr = n.Addresses().At(0).Addr()
 		}
 		ep.initFakeUDPAddr()
-		if n.DiscoKey.IsZero() {
+		if n.DiscoKey().IsZero() {
 			ep.disco.Store(nil)
 		} else {
 			ep.disco.Store(&endpointDisco{
-				key:   n.DiscoKey,
-				short: n.DiscoKey.ShortString(),
+				key:   n.DiscoKey(),
+				short: n.DiscoKey().ShortString(),
 			})
 
 			if debugDisco() { // rather than making a new knob
-				c.logf("magicsock: created endpoint key=%s: disco=%s; %v", n.Key.ShortString(), n.DiscoKey.ShortString(), logger.ArgWriter(func(w *bufio.Writer) {
+				c.logf("magicsock: created endpoint key=%s: disco=%s; %v", n.Key().ShortString(), n.DiscoKey().ShortString(), logger.ArgWriter(func(w *bufio.Writer) {
 					const derpPrefix = "127.3.3.40:"
-					if strings.HasPrefix(n.DERP, derpPrefix) {
-						ipp, _ := netip.ParseAddrPort(n.DERP)
+					if strings.HasPrefix(n.DERP(), derpPrefix) {
+						ipp, _ := netip.ParseAddrPort(n.DERP())
 						regionID := int(ipp.Port())
 						code := c.derpRegionCodeLocked(regionID)
 						if code != "" {
@@ -1865,14 +1860,16 @@ func (c *Conn) SetNetworkMap(nm *netmap.NetworkMap) {
 						fmt.Fprintf(w, "derp=%v%s ", regionID, code)
 					}
 
-					for _, a := range n.AllowedIPs {
+					for i := range n.AllowedIPs().LenIter() {
+						a := n.AllowedIPs().At(i)
 						if a.IsSingleIP() {
 							fmt.Fprintf(w, "aip=%v ", a.Addr())
 						} else {
 							fmt.Fprintf(w, "aip=%v ", a)
 						}
 					}
-					for _, ep := range n.Endpoints {
+					for i := range n.Endpoints().LenIter() {
+						ep := n.Endpoints().At(i)
 						fmt.Fprintf(w, "ep=%v ", ep)
 					}
 				}))
@@ -1890,7 +1887,7 @@ func (c *Conn) SetNetworkMap(nm *netmap.NetworkMap) {
 	if c.peerMap.nodeCount() != len(nm.Peers) {
 		keep := make(map[key.NodePublic]bool, len(nm.Peers))
 		for _, n := range nm.Peers {
-			keep[n.Key] = true
+			keep[n.Key()] = true
 		}
 		c.peerMap.forEachEndpoint(func(ep *endpoint) {
 			if !keep[ep.publicKey] {
@@ -2096,7 +2093,8 @@ func (c *Conn) shouldDoPeriodicReSTUNLocked() bool {
 			c.logf("magicsock: periodicReSTUN: idle for %v", idleFor.Round(time.Second))
 		}
 		if idleFor > sessionActiveTimeout {
-			if c.netMap != nil && c.netMap.Debug != nil && c.netMap.Debug.ForceBackgroundSTUN {
+			if c.netMap != nil && c.netMap.SelfNode.Valid() &&
+				views.SliceContains(c.netMap.SelfNode.Capabilities(), tailcfg.NodeAttrDebugForceBackgroundSTUN) {
 				// Overridden by control.
 				return true
 			}
@@ -2594,11 +2592,6 @@ const (
 	// STUN-derived endpoint valid for. UDP NAT mappings typically
 	// expire at 30 seconds, so this is a few seconds shy of that.
 	endpointsFreshEnoughDuration = 27 * time.Second
-
-	// endpointTrackerLifetime is how long we continue advertising an
-	// endpoint after we last see it. This is intentionally chosen to be
-	// slightly longer than a full netcheck period.
-	endpointTrackerLifetime = 5*time.Minute + 10*time.Second
 )
 
 // Constants that are variable for testing.
@@ -2681,79 +2674,6 @@ type discoInfo struct {
 
 	// lastPingTime is the last time of a ping for discoKey.
 	lastPingTime time.Time
-}
-
-type endpointTrackerEntry struct {
-	endpoint tailcfg.Endpoint
-	until    time.Time
-}
-
-type endpointTracker struct {
-	mu    sync.Mutex
-	cache map[netip.AddrPort]endpointTrackerEntry
-}
-
-func (et *endpointTracker) update(now time.Time, eps []tailcfg.Endpoint) (epsPlusCached []tailcfg.Endpoint) {
-	epsPlusCached = eps
-
-	var inputEps set.Slice[netip.AddrPort]
-	for _, ep := range eps {
-		inputEps.Add(ep.Addr)
-	}
-
-	et.mu.Lock()
-	defer et.mu.Unlock()
-
-	// Add entries to the return array that aren't already there.
-	for k, ep := range et.cache {
-		// If the endpoint was in the input list, or has expired, skip it.
-		if inputEps.Contains(k) {
-			continue
-		} else if now.After(ep.until) {
-			continue
-		}
-
-		// We haven't seen this endpoint; add to the return array
-		epsPlusCached = append(epsPlusCached, ep.endpoint)
-	}
-
-	// Add entries from the original input array into the cache, and/or
-	// extend the lifetime of entries that are already in the cache.
-	until := now.Add(endpointTrackerLifetime)
-	for _, ep := range eps {
-		et.addLocked(now, ep, until)
-	}
-
-	// Remove everything that has now expired.
-	et.removeExpiredLocked(now)
-	return epsPlusCached
-}
-
-// add will store the provided endpoint(s) in the cache for a fixed period of
-// time, and remove any entries in the cache that have expired.
-//
-// et.mu must be held.
-func (et *endpointTracker) addLocked(now time.Time, ep tailcfg.Endpoint, until time.Time) {
-	// If we already have an entry for this endpoint, update the timeout on
-	// it; otherwise, add it.
-	entry, found := et.cache[ep.Addr]
-	if found {
-		entry.until = until
-	} else {
-		entry = endpointTrackerEntry{ep, until}
-	}
-	mak.Set(&et.cache, ep.Addr, entry)
-}
-
-// removeExpired will remove all expired entries from the cache
-//
-// et.mu must be held
-func (et *endpointTracker) removeExpiredLocked(now time.Time) {
-	for k, ep := range et.cache {
-		if now.After(ep.until) {
-			delete(et.cache, k)
-		}
-	}
 }
 
 var (

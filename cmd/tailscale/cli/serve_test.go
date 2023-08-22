@@ -810,7 +810,7 @@ func TestVerifyFunnelEnabled(t *testing.T) {
 				defer func() { fakeStatus.Self.Capabilities = oldCaps }() // reset after test
 				fakeStatus.Self.Capabilities = tt.caps
 			}
-			st, err := e.getLocalClientStatus(ctx)
+			st, err := e.getLocalClientStatusWithoutPeers(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -861,7 +861,7 @@ var fakeStatus = &ipnstate.Status{
 	},
 }
 
-func (lc *fakeLocalServeClient) Status(ctx context.Context) (*ipnstate.Status, error) {
+func (lc *fakeLocalServeClient) StatusWithoutPeers(ctx context.Context) (*ipnstate.Status, error) {
 	return fakeStatus, nil
 }
 
@@ -893,7 +893,11 @@ func (lc *fakeLocalServeClient) QueryFeature(ctx context.Context, feature string
 }
 
 func (lc *fakeLocalServeClient) WatchIPNBus(ctx context.Context, mask ipn.NotifyWatchOpt) (*tailscale.IPNBusWatcher, error) {
-	return nil, nil
+	return nil, nil // unused in tests
+}
+
+func (lc *fakeLocalServeClient) IncrementCounter(ctx context.Context, name string, delta int) error {
+	return nil // unused in tests
 }
 
 // exactError returns an error checker that wants exactly the provided want error.

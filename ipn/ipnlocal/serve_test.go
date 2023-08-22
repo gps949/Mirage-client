@@ -190,9 +190,9 @@ func TestServeHTTPProxy(t *testing.T) {
 	b.pm = pm
 
 	b.netMap = &netmap.NetworkMap{
-		SelfNode: &tailcfg.Node{
+		SelfNode: (&tailcfg.Node{
 			Name: "example.ts.net",
-		},
+		}).View(),
 		UserProfiles: map[tailcfg.UserID]tailcfg.UserProfile{
 			tailcfg.UserID(1): {
 				LoginName:     "someone@example.com",
@@ -201,16 +201,16 @@ func TestServeHTTPProxy(t *testing.T) {
 			},
 		},
 	}
-	b.nodeByAddr = map[netip.Addr]*tailcfg.Node{
-		netip.MustParseAddr("100.150.151.152"): {
+	b.nodeByAddr = map[netip.Addr]tailcfg.NodeView{
+		netip.MustParseAddr("100.150.151.152"): (&tailcfg.Node{
 			ComputedName: "some-peer",
 			User:         tailcfg.UserID(1),
-		},
-		netip.MustParseAddr("100.150.151.153"): {
+		}).View(),
+		netip.MustParseAddr("100.150.151.153"): (&tailcfg.Node{
 			ComputedName: "some-tagged-peer",
 			Tags:         []string{"tag:server", "tag:test"},
 			User:         tailcfg.UserID(1),
-		},
+		}).View(),
 	}
 
 	// Start test serve endpoint.

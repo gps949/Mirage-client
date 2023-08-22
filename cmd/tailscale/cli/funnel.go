@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
-	"golang.org/x/exp/slices"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tailcfg"
@@ -83,7 +83,7 @@ func (e *serveEnv) runFunnel(ctx context.Context, args []string) error {
 	if sc == nil {
 		sc = new(ipn.ServeConfig)
 	}
-	st, err := e.getLocalClientStatus(ctx)
+	st, err := e.getLocalClientStatusWithoutPeers(ctx)
 	if err != nil {
 		return fmt.Errorf("getting client status: %w", err)
 	}
@@ -94,8 +94,13 @@ func (e *serveEnv) runFunnel(ctx context.Context, args []string) error {
 	}
 	port := uint16(port64)
 
-	if err := e.verifyFunnelEnabled(ctx, st, port); err != nil {
-		return err
+	if on {
+		// Don't block from turning off existing Funnel if
+		// network configuration/capabilities have changed.
+		// Only block from starting new Funnels.
+		if err := e.verifyFunnelEnabled(ctx, st, port); err != nil {
+			return err
+		}
 	}
 
 	dnsName := strings.TrimSuffix(st.Self.DNSName, ".")
@@ -141,7 +146,7 @@ func (e *serveEnv) verifyFunnelEnabled(ctx context.Context, st *ipnstate.Status,
 		return nil // already enabled
 	}
 	enableErr := e.enableFeatureInteractive(ctx, "funnel", hasFunnelAttrs)
-	st, statusErr := e.getLocalClientStatus(ctx) // get updated status; interactive flow may block
+	st, statusErr := e.getLocalClientStatusWithoutPeers(ctx) // get updated status; interactive flow may block
 	switch {
 	case statusErr != nil:
 		return fmt.Errorf("getting client status: %w", statusErr)
@@ -176,7 +181,7 @@ func printFunnelWarning(sc *ipn.ServeConfig) {
 		p, _ := strconv.ParseUint(portStr, 10, 16)
 		if _, ok := sc.TCP[uint16(p)]; !ok {
 			warn = true
-			fmt.Fprintf(os.Stderr, "Warning: funnel=on for %s, but no serve config\n", hp)
+			fmt.Fprintf(os.Stderr, "\nWarning: funnel=on for %s, but no serve config\n", hp)
 		}
 	}
 	if warn {

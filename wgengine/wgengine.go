@@ -52,9 +52,9 @@ var ErrNoChanges = errors.New("no changes made to Engine config")
 
 // PeerForIP is the type returned by Engine.PeerForIP.
 type PeerForIP struct {
-	// Node is the matched node. It's always non-nil when
+	// Node is the matched node. It's always a valid value when
 	// Engine.PeerForIP returns ok==true.
-	Node *tailcfg.Node
+	Node tailcfg.NodeView
 
 	// IsSelf is whether the Node is the local process.
 	IsSelf bool
@@ -72,10 +72,8 @@ type Engine interface {
 	// This is called whenever tailcontrol (the control plane)
 	// sends an updated network map.
 	//
-	// The *tailcfg.Debug parameter can be nil.
-	//
 	// The returned error is ErrNoChanges if no changes were made.
-	Reconfig(*wgcfg.Config, *router.Config, *dns.Config, *tailcfg.Debug) error
+	Reconfig(*wgcfg.Config, *router.Config, *dns.Config) error
 
 	// PeerForIP returns the node to which the provided IP routes,
 	// if any. If none is found, (nil, false) is returned.

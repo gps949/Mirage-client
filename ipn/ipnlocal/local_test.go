@@ -87,46 +87,46 @@ func TestNetworkMapCompare(t *testing.T) {
 		},
 		{
 			"Peers identical",
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{}},
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{}},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{})},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{})},
 			true,
 		},
 		{
 			"Peer list length",
 			// length of Peers list differs
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{{}}},
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{}},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{{}})},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{})},
 			false,
 		},
 		{
 			"Node names identical",
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{{Name: "A"}}},
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{{Name: "A"}}},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{{Name: "A"}})},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{{Name: "A"}})},
 			true,
 		},
 		{
 			"Node names differ",
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{{Name: "A"}}},
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{{Name: "B"}}},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{{Name: "A"}})},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{{Name: "B"}})},
 			false,
 		},
 		{
 			"Node lists identical",
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{node1, node1}},
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{node1, node1}},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{node1, node1})},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{node1, node1})},
 			true,
 		},
 		{
 			"Node lists differ",
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{node1, node1}},
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{node1, node2}},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{node1, node1})},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{node1, node2})},
 			false,
 		},
 		{
 			"Node Users differ",
 			// User field is not checked.
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{{User: 0}}},
-			&netmap.NetworkMap{Peers: []*tailcfg.Node{{User: 1}}},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{{User: 0}})},
+			&netmap.NetworkMap{Peers: nodeViews([]*tailcfg.Node{{User: 1}})},
 			true,
 		},
 	}
@@ -483,7 +483,7 @@ func TestPeerAPIBase(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := peerAPIBase(tt.nm, tt.peer)
+			got := peerAPIBase(tt.nm, tt.peer.View())
 			if got != tt.want {
 				t.Errorf("got %q; want %q", got, tt.want)
 			}
@@ -758,7 +758,7 @@ func TestPacketFilterPermitsUnlockedNodes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := packetFilterPermitsUnlockedNodes(tt.peers, tt.filter); got != tt.want {
+			if got := packetFilterPermitsUnlockedNodes(nodeViews(tt.peers), tt.filter); got != tt.want {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
@@ -795,9 +795,9 @@ func TestStatusWithoutPeers(t *testing.T) {
 	cc.send(nil, "", false, &netmap.NetworkMap{
 		MachineStatus: tailcfg.MachineAuthorized,
 		Addresses:     ipps("100.101.101.101"),
-		SelfNode: &tailcfg.Node{
+		SelfNode: (&tailcfg.Node{
 			Addresses: ipps("100.101.101.101"),
-		},
+		}).View(),
 	})
 	got := b.StatusWithoutPeers()
 	if got.TailscaleIPs == nil {

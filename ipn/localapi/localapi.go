@@ -20,12 +20,12 @@ import (
 	"net/netip"
 	"net/url"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/exp/slices"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/envknob"
 	"tailscale.com/health"
@@ -356,8 +356,8 @@ func (h *Handler) serveBugReport(w http.ResponseWriter, r *http.Request) {
 
 	// Information about the current node from the netmap
 	if nm := h.b.NetMap(); nm != nil {
-		if self := nm.SelfNode; self != nil {
-			h.logf("user bugreport node info: nodeid=%q stableid=%q expiry=%q", self.ID, self.StableID, self.KeyExpiry.Format(time.RFC3339))
+		if self := nm.SelfNode; self.Valid() {
+			h.logf("user bugreport node info: nodeid=%q stableid=%q expiry=%q", self.ID(), self.StableID(), self.KeyExpiry().Format(time.RFC3339))
 		}
 		h.logf("user bugreport public keys: machine=%q node=%q", nm.MachineKey, nm.NodeKey)
 	} else {
@@ -454,8 +454,8 @@ func (h *Handler) serveWhoIs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := &apitype.WhoIsResponse{
-		Node:        n,  // always non-nil per WhoIsResponse contract
-		UserProfile: &u, // always non-nil per WhoIsResponse contract
+		Node:        n.AsStruct(), // always non-nil per WhoIsResponse contract
+		UserProfile: &u,           // always non-nil per WhoIsResponse contract
 		CapMap:      b.PeerCaps(ipp.Addr()),
 	}
 	j, err := json.MarshalIndent(res, "", "\t")

@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/poly1305"
-	"golang.org/x/exp/maps"
+	xmaps "golang.org/x/exp/maps"
 	"tailscale.com/disco"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/net/stun"
@@ -71,8 +71,6 @@ type endpoint struct {
 	endpointState      map[netip.AddrPort]*endpointState
 	isCallMeMaybeEP    map[netip.AddrPort]bool
 
-	pendingCLIPings []pendingCLIPing // any outstanding "tailscale ping" commands running
-
 	// The following fields are related to the new "silent disco"
 	// implementation that's a WIP as of 2022-10-20.
 	// See #540 for background.
@@ -80,11 +78,6 @@ type endpoint struct {
 
 	expired         bool // whether the node has expired
 	isWireguardOnly bool // whether the endpoint is WireGuard only
-}
-
-type pendingCLIPing struct {
-	res *ipnstate.PingResult
-	cb  func(*ipnstate.PingResult)
 }
 
 // endpointDisco is the current disco key and short string for an endpoint. This
@@ -99,6 +92,8 @@ type sentPing struct {
 	at      mono.Time
 	timer   *time.Timer // timeout timer
 	purpose discoPingPurpose
+	res     *ipnstate.PingResult       // nil unless CLI ping
+	cb      func(*ipnstate.PingResult) // nil unless CLI ping
 }
 
 // endpointState is some state and history for a specific endpoint of
@@ -313,7 +308,7 @@ func (de *endpoint) addrForWireGuardSendLocked(now mono.Time) (udpAddr netip.Add
 		return udpAddr, false
 	}
 
-	candidates := maps.Keys(de.endpointState)
+	candidates := xmaps.Keys(de.endpointState)
 	if len(candidates) == 0 {
 		de.c.logf("magicsock: addrForSendWireguardLocked: [unexpected] no candidates available for endpoint")
 		return udpAddr, false
@@ -363,7 +358,7 @@ func (de *endpoint) heartbeat() {
 	udpAddr, _, _ := de.addrForSendLocked(now)
 	if udpAddr.IsValid() {
 		// We have a preferred path. Ping that every 2 seconds.
-		de.startDiscoPingLocked(udpAddr, now, pingHeartbeat, 0)
+		de.startDiscoPingLocked(udpAddr, now, pingHeartbeat, 0, nil, nil)
 	}
 
 	if de.wantFullPingLocked(now) {
@@ -415,22 +410,21 @@ func (de *endpoint) cliPing(res *ipnstate.PingResult, size int, cb func(*ipnstat
 		return
 	}
 
-	de.pendingCLIPings = append(de.pendingCLIPings, pendingCLIPing{res, cb})
-
 	now := mono.Now()
 	udpAddr, derpAddr, _ := de.addrForSendLocked(now)
+
 	if derpAddr.IsValid() {
-		de.startDiscoPingLocked(derpAddr, now, pingCLI, size)
+		de.startDiscoPingLocked(derpAddr, now, pingCLI, size, res, cb)
 	}
 	if udpAddr.IsValid() && now.Before(de.trustBestAddrUntil) {
 		// Already have an active session, so just ping the address we're using.
 		// Otherwise "tailscale ping" results to a node on the local network
 		// can look like they're bouncing between, say 10.0.0.0/9 and the peer's
 		// IPv6 address, both 1ms away, and it's random who replies first.
-		de.startDiscoPingLocked(udpAddr, now, pingCLI, size)
+		de.startDiscoPingLocked(udpAddr, now, pingCLI, size, res, cb)
 	} else {
 		for ep := range de.endpointState {
-			de.startDiscoPingLocked(ep, now, pingCLI, size)
+			de.startDiscoPingLocked(ep, now, pingCLI, size, res, cb)
 		}
 	}
 	de.noteActiveLocked()
@@ -573,8 +567,10 @@ const (
 	pingCLI
 )
 
-// startDiscoPingLocked sends a disco ping to ep in a separate goroutine.
-func (de *endpoint) startDiscoPingLocked(ep netip.AddrPort, now mono.Time, purpose discoPingPurpose, size int) {
+// startDiscoPingLocked sends a disco ping to ep in a separate
+// goroutine. res and cb are for returning the results of CLI pings,
+// otherwise they are nil.
+func (de *endpoint) startDiscoPingLocked(ep netip.AddrPort, now mono.Time, purpose discoPingPurpose, size int, res *ipnstate.PingResult, cb func(*ipnstate.PingResult)) {
 	if runtime.GOOS == "js" {
 		return
 	}
@@ -599,7 +595,10 @@ func (de *endpoint) startDiscoPingLocked(ep netip.AddrPort, now mono.Time, purpo
 		at:      now,
 		timer:   time.AfterFunc(pingTimeoutDuration, func() { de.discoPingTimeout(txid) }),
 		purpose: purpose,
+		res:     res,
+		cb:      cb,
 	}
+
 	logLevel := discoLog
 	if purpose == pingHeartbeat {
 		logLevel = discoVerboseLog
@@ -630,7 +629,7 @@ func (de *endpoint) sendDiscoPingsLocked(now mono.Time, sendCallMeMaybe bool) {
 			de.c.dlogf("[v1] magicsock: disco: send, starting discovery for %v (%v)", de.publicKey.ShortString(), de.discoShort())
 		}
 
-		de.startDiscoPingLocked(ep, now, pingDiscovery, 0)
+		de.startDiscoPingLocked(ep, now, pingDiscovery, 0, nil, nil)
 	}
 	derpAddr := de.derpAddr
 	if sentAny && sendCallMeMaybe && derpAddr.IsValid() {
@@ -725,15 +724,15 @@ func (de *endpoint) setLastPing(ipp netip.AddrPort, now mono.Time) {
 
 // updateFromNode updates the endpoint based on a tailcfg.Node from a NetMap
 // update.
-func (de *endpoint) updateFromNode(n *tailcfg.Node, heartbeatDisabled bool) {
-	if n == nil {
+func (de *endpoint) updateFromNode(n tailcfg.NodeView, heartbeatDisabled bool) {
+	if !n.Valid() {
 		panic("nil node when updating endpoint")
 	}
 	de.mu.Lock()
 	defer de.mu.Unlock()
 
 	de.heartbeatDisabled = heartbeatDisabled
-	de.expired = n.Expired
+	de.expired = n.Expired()
 
 	epDisco := de.disco.Load()
 	var discoKey key.DiscoPublic
@@ -741,11 +740,11 @@ func (de *endpoint) updateFromNode(n *tailcfg.Node, heartbeatDisabled bool) {
 		discoKey = epDisco.key
 	}
 
-	if discoKey != n.DiscoKey {
-		de.c.logf("[v1] magicsock: disco: node %s changed from %s to %s", de.publicKey.ShortString(), discoKey, n.DiscoKey)
+	if discoKey != n.DiscoKey() {
+		de.c.logf("[v1] magicsock: disco: node %s changed from %s to %s", de.publicKey.ShortString(), discoKey, n.DiscoKey())
 		de.disco.Store(&endpointDisco{
-			key:   n.DiscoKey,
-			short: n.DiscoKey.ShortString(),
+			key:   n.DiscoKey(),
+			short: n.DiscoKey().ShortString(),
 		})
 		de.debugUpdates.Add(EndpointChange{
 			When: time.Now(),
@@ -753,7 +752,7 @@ func (de *endpoint) updateFromNode(n *tailcfg.Node, heartbeatDisabled bool) {
 		})
 		de.resetLocked()
 	}
-	if n.DERP == "" {
+	if n.DERP() == "" {
 		if de.derpAddr.IsValid() {
 			de.debugUpdates.Add(EndpointChange{
 				When: time.Now(),
@@ -763,7 +762,7 @@ func (de *endpoint) updateFromNode(n *tailcfg.Node, heartbeatDisabled bool) {
 		}
 		de.derpAddr = netip.AddrPort{}
 	} else {
-		newDerp, _ := netip.ParseAddrPort(n.DERP)
+		newDerp, _ := netip.ParseAddrPort(n.DERP())
 		if de.derpAddr != newDerp {
 			de.debugUpdates.Add(EndpointChange{
 				When: time.Now(),
@@ -780,7 +779,8 @@ func (de *endpoint) updateFromNode(n *tailcfg.Node, heartbeatDisabled bool) {
 	}
 
 	var newIpps []netip.AddrPort
-	for i, epStr := range n.Endpoints {
+	for i := range n.Endpoints().LenIter() {
+		epStr := n.Endpoints().At(i)
 		if i > math.MaxInt16 {
 			// Seems unlikely.
 			continue
@@ -914,11 +914,13 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src netip
 		}))
 	}
 
-	for _, pp := range de.pendingCLIPings {
-		de.c.populateCLIPingResponseLocked(pp.res, latency, sp.to)
-		go pp.cb(pp.res)
+	// Currently only CLI ping uses this callback.
+	if sp.cb != nil {
+		if sp.purpose == pingCLI {
+			de.c.populateCLIPingResponseLocked(sp.res, latency, sp.to)
+		}
+		go sp.cb(sp.res)
 	}
-	de.pendingCLIPings = nil
 
 	// Promote this pong response to our current best address if it's lower latency.
 	// TODO(bradfitz): decide how latency vs. preference order affects decision
@@ -1133,7 +1135,6 @@ func (de *endpoint) stopAndReset() {
 		de.heartBeatTimer.Stop()
 		de.heartBeatTimer = nil
 	}
-	de.pendingCLIPings = nil
 }
 
 // resetLocked clears all the endpoint's p2p state, reverting it to a

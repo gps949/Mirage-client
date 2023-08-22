@@ -19,6 +19,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -26,7 +27,6 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 	"go4.org/mem"
-	"golang.org/x/exp/slices"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/net/tsaddr"
 	"tailscale.com/smallzstd"
@@ -400,6 +400,8 @@ func (s *Server) AllNodes() (nodes []*tailcfg.Node) {
 	return nodes
 }
 
+const domain = "fake-control.example.net"
+
 func (s *Server) getUser(nodeKey key.NodePublic) (*tailcfg.User, *tailcfg.Login) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -413,7 +415,6 @@ func (s *Server) getUser(nodeKey key.NodePublic) (*tailcfg.User, *tailcfg.Login)
 		return u, s.logins[nodeKey]
 	}
 	id := tailcfg.UserID(len(s.users) + 1)
-	domain := "fake-control.example.net"
 	loginName := fmt.Sprintf("user-%d@%s", id, domain)
 	displayName := fmt.Sprintf("User %d", id)
 	login := &tailcfg.Login{
@@ -422,13 +423,11 @@ func (s *Server) getUser(nodeKey key.NodePublic) (*tailcfg.User, *tailcfg.Login)
 		LoginName:     loginName,
 		DisplayName:   displayName,
 		ProfilePicURL: "https://tailscale.com/static/images/marketing/team-carney.jpg",
-		Domain:        domain,
 	}
 	user := &tailcfg.User{
 		ID:          id,
 		LoginName:   loginName,
 		DisplayName: displayName,
-		Domain:      domain,
 		Logins:      []tailcfg.LoginID{login.ID},
 	}
 	s.users[nodeKey] = user
@@ -814,6 +813,8 @@ func (s *Server) MapResponse(req *tailcfg.MapRequest) (res *tailcfg.MapResponse,
 		// node key rotated away (once test server supports that)
 		return nil, nil
 	}
+	node.Capabilities = append(node.Capabilities, tailcfg.NodeAttrDisableUPnP)
+
 	user, _ := s.getUser(nk)
 	t := time.Date(2020, 8, 3, 0, 0, 0, 1, time.UTC)
 	dns := s.DNSConfig
@@ -827,14 +828,11 @@ func (s *Server) MapResponse(req *tailcfg.MapRequest) (res *tailcfg.MapResponse,
 	res = &tailcfg.MapResponse{
 		Node:            node,
 		DERPMap:         s.DERPMap,
-		Domain:          string(user.Domain),
+		Domain:          domain,
 		CollectServices: "true",
 		PacketFilter:    packetFilterWithIngressCaps(),
-		Debug: &tailcfg.Debug{
-			DisableUPnP: "true",
-		},
-		DNSConfig:   dns,
-		ControlTime: &t,
+		DNSConfig:       dns,
+		ControlTime:     &t,
 	}
 
 	s.mu.Lock()

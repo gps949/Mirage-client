@@ -7,6 +7,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	_ "embed"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/gorilla/csrf"
 	"tailscale.com/client/tailscale"
 	"tailscale.com/envknob"
 	"tailscale.com/ipn"
@@ -51,6 +53,8 @@ type Server struct {
 
 	devMode  bool
 	devProxy *httputil.ReverseProxy // only filled when devMode is on
+
+	apiHandler http.Handler // csrf-protected api handler
 }
 
 // NewServer constructs a new Tailscale web client server.
@@ -69,6 +73,11 @@ func NewServer(devMode bool, lc *tailscale.LocalClient) (s *Server, cleanup func
 	if s.devMode {
 		cleanup = s.startDevServer()
 		s.addProxyToDevServer()
+
+		// Create new handler for "/api" requests.
+		// And protect with gorilla csrf.
+		csrfProtect := csrf.Protect(csrfKey())
+		s.apiHandler = csrfProtect(&api{s: s})
 	}
 	return s, cleanup
 }
@@ -76,31 +85,6 @@ func NewServer(devMode bool, lc *tailscale.LocalClient) (s *Server, cleanup func
 func init() {
 	tmpl = template.Must(template.New("web.html").Parse(webHTML))
 	template.Must(tmpl.New("web.css").Parse(webCSS))
-}
-
-type tmplData struct {
-	Profile           tailcfg.UserProfile
-	SynologyUser      string
-	Status            string
-	DeviceName        string
-	IP                string
-	AdvertiseExitNode bool
-	AdvertiseRoutes   string
-	LicensesURL       string
-	TUNMode           bool
-	IsSynology        bool
-	DSMVersion        int // 6 or 7, if IsSynology=true
-	IsUnraid          bool
-	UnraidToken       string
-	IPNVersion        string
-}
-
-type postedData struct {
-	ServerCode        string
-	AdvertiseRoutes   string
-	AdvertiseExitNode bool
-	Reauthenticate    bool
-	ForceLogout       bool
 }
 
 // authorize returns the name of the user accessing the web UI after verifying
@@ -295,12 +279,16 @@ req.send(null);
 // ServeHTTP processes all requests for the Tailscale web client.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.devMode {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			// Pass through to other handlers via CSRF protection.
+			s.apiHandler.ServeHTTP(w, r)
+			return
+		}
 		// When in dev mode, proxy to the Vite dev server.
 		s.devProxy.ServeHTTP(w, r)
 		return
 	}
 
-	ctx := r.Context()
 	if authRedirect(w, r) {
 		return
 	}
@@ -310,89 +298,49 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Path == "/redirect" || r.URL.Path == "/redirect/" {
+	switch {
+	case r.URL.Path == "/redirect" || r.URL.Path == "/redirect/":
 		io.WriteString(w, authenticationRedirectHTML)
 		return
+	case r.Method == "POST":
+		s.servePostNodeUpdate(w, r)
+		return
+	default:
+		s.serveGetNodeData(w, r, user)
+		return
 	}
+}
 
+type nodeData struct {
+	Profile           tailcfg.UserProfile
+	SynologyUser      string
+	Status            string
+	DeviceName        string
+	IP                string
+	AdvertiseExitNode bool
+	AdvertiseRoutes   string
+	LicensesURL       string
+	TUNMode           bool
+	IsSynology        bool
+	DSMVersion        int // 6 or 7, if IsSynology=true
+	IsUnraid          bool
+	UnraidToken       string
+	IPNVersion        string
+}
+
+func (s *Server) getNodeData(ctx context.Context, user string) (*nodeData, error) {
 	st, err := s.lc.Status(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, err
 	}
 	prefs, err := s.lc.GetPrefs(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, err
 	}
-
-	if r.Method == "POST" {
-		defer r.Body.Close()
-		var postData postedData
-		type mi map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&postData); err != nil {
-			w.WriteHeader(400)
-			json.NewEncoder(w).Encode(mi{"error": err.Error()})
-			return
-		}
-
-		routes, err := netutil.CalcAdvertiseRoutes(postData.AdvertiseRoutes, postData.AdvertiseExitNode)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(mi{"error": err.Error()})
-			return
-		}
-
-		if postData.ServerCode != "" && postData.ServerCode != "NOUPDATE" && !strings.Contains(postData.ServerCode, "https://") && !strings.Contains(postData.ServerCode, "http://") {
-			postData.ServerCode = "https://" + postData.ServerCode
-		} else if postData.ServerCode == "" {
-			postData.ServerCode = ipn.DefaultControlURL
-		}
-
-		mp := &ipn.MaskedPrefs{
-			ControlURLSet:      postData.ServerCode != "NOUPDATE" && prefs.ControlURL != postData.ServerCode,
-			AdvertiseRoutesSet: true,
-			WantRunningSet:     true,
-		}
-		mp.Prefs.ControlURL = postData.ServerCode
-		mp.Prefs.WantRunning = true
-		mp.Prefs.AdvertiseRoutes = routes
-		log.Printf("Doing edit: %v", mp.Pretty())
-
-		if _, err := s.lc.EditPrefs(ctx, mp); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(mi{"error": err.Error()})
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		var reauth, logout bool
-		if postData.Reauthenticate {
-			reauth = true
-		}
-		if postData.ForceLogout {
-			logout = true
-		}
-		log.Printf("mirageUp(reauth=%v, logout=%v) ...", reauth, logout)
-		url, err := s.tailscaleUp(r.Context(), st, postData)
-		log.Printf("mirageUp = (URL %v, %v)", url != "", err)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(mi{"error": err.Error()})
-			return
-		}
-		if url != "" {
-			json.NewEncoder(w).Encode(mi{"url": url})
-		} else {
-			io.WriteString(w, "{}")
-		}
-		return
-	}
-
 	profile := st.User[st.Self.UserID]
 	deviceName := strings.Split(st.Self.DNSName, ".")[0]
 	versionShort := strings.Split(st.Version, "-")[0]
-	data := tmplData{
+	data := &nodeData{
 		SynologyUser: user,
 		Profile:      profile,
 		Status:       st.BackendState,
@@ -420,16 +368,122 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(st.TailscaleIPs) != 0 {
 		data.IP = st.TailscaleIPs[0].String()
 	}
+	return data, nil
+}
 
+func (s *Server) serveGetNodeData(w http.ResponseWriter, r *http.Request, user string) {
+	data, err := s.getNodeData(r.Context(), user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	buf := new(bytes.Buffer)
-	if err := tmpl.Execute(buf, data); err != nil {
+	if err := tmpl.Execute(buf, *data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Write(buf.Bytes())
 }
 
-func (s *Server) tailscaleUp(ctx context.Context, st *ipnstate.Status, postData postedData) (authURL string, retErr error) {
+func (s *Server) serveGetNodeDataJSON(w http.ResponseWriter, r *http.Request, user string) {
+	data, err := s.getNodeData(r.Context(), user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := json.NewEncoder(w).Encode(*data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	return
+}
+
+type nodeUpdate struct {
+	ServerCode        string
+	AdvertiseRoutes   string
+	AdvertiseExitNode bool
+	Reauthenticate    bool
+	ForceLogout       bool
+}
+
+func (s *Server) servePostNodeUpdate(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+
+	st, err := s.lc.Status(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var postData nodeUpdate
+	type mi map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&postData); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(mi{"error": err.Error()})
+		return
+	}
+
+	routes, err := netutil.CalcAdvertiseRoutes(postData.AdvertiseRoutes, postData.AdvertiseExitNode)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(mi{"error": err.Error()})
+		return
+	}
+
+	if postData.ServerCode != "" && postData.ServerCode != "NOUPDATE" && !strings.Contains(postData.ServerCode, "https://") && !strings.Contains(postData.ServerCode, "http://") {
+		postData.ServerCode = "https://" + postData.ServerCode
+	} else if postData.ServerCode == "" {
+		postData.ServerCode = ipn.DefaultControlURL
+	}
+
+	prefs, err := s.lc.GetPrefs(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	mp := &ipn.MaskedPrefs{
+		ControlURLSet:      postData.ServerCode != "NOUPDATE" && prefs.ControlURL != postData.ServerCode,
+		AdvertiseRoutesSet: true,
+		WantRunningSet:     true,
+	}
+	mp.Prefs.ControlURL = postData.ServerCode
+	mp.Prefs.WantRunning = true
+	mp.Prefs.AdvertiseRoutes = routes
+	log.Printf("Doing edit: %v", mp.Pretty())
+
+	if _, err := s.lc.EditPrefs(r.Context(), mp); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(mi{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	var reauth, logout bool
+	if postData.Reauthenticate {
+		reauth = true
+	}
+	if postData.ForceLogout {
+		logout = true
+	}
+	log.Printf("mirageUp(reauth=%v, logout=%v) ...", reauth, logout)
+	url, err := s.tailscaleUp(r.Context(), st, postData)
+	log.Printf("mirageUp = (URL %v, %v)", url != "", err)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(mi{"error": err.Error()})
+		return
+	}
+	if url != "" {
+		json.NewEncoder(w).Encode(mi{"url": url})
+	} else {
+		io.WriteString(w, "{}")
+	}
+	return
+}
+
+func (s *Server) tailscaleUp(ctx context.Context, st *ipnstate.Status, postData nodeUpdate) (authURL string, retErr error) {
 	if postData.ForceLogout {
 		if err := s.lc.Logout(ctx); err != nil {
 			return "", fmt.Errorf("Logout error: %w", err)
@@ -486,4 +540,15 @@ func (s *Server) tailscaleUp(ctx context.Context, st *ipnstate.Status, postData 
 			return *url, nil
 		}
 	}
+}
+
+// csrfKey creates a new random csrf token.
+// If an error surfaces during key creation,
+// the error is logged and the active process terminated.
+func csrfKey() []byte {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		log.Fatal("error generating CSRF key: %w", err)
+	}
+	return key
 }

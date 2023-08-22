@@ -17,12 +17,12 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/exp/slices"
 	"tailscale.com/ipn"
 	"tailscale.com/logtail/backoff"
 	"tailscale.com/net/netutil"
@@ -193,7 +193,7 @@ func (b *LocalBackend) updateServeTCPPortNetMapAddrListenersLocked(ports []uint1
 		b.logf("netMap is nil")
 		return
 	}
-	if nm.SelfNode == nil {
+	if !nm.SelfNode.Valid() {
 		b.logf("netMap SelfNode is nil")
 		return
 	}
@@ -227,7 +227,7 @@ func (b *LocalBackend) SetServeConfig(config *ipn.ServeConfig) error {
 	if nm == nil {
 		return errors.New("netMap is nil")
 	}
-	if nm.SelfNode == nil {
+	if !nm.SelfNode.Valid() {
 		return errors.New("netMap SelfNode is nil")
 	}
 	profileID := b.pm.CurrentProfile().ID
@@ -257,7 +257,7 @@ func (b *LocalBackend) ServeConfig() ipn.ServeConfigView {
 	return b.serveConfig
 }
 
-func (b *LocalBackend) HandleIngressTCPConn(ingressPeer *tailcfg.Node, target ipn.HostPort, srcAddr netip.AddrPort, getConnOrReset func() (net.Conn, bool), sendRST func()) {
+func (b *LocalBackend) HandleIngressTCPConn(ingressPeer tailcfg.NodeView, target ipn.HostPort, srcAddr netip.AddrPort, getConnOrReset func() (net.Conn, bool), sendRST func()) {
 	b.mu.Lock()
 	sc := b.serveConfig
 	b.mu.Unlock()

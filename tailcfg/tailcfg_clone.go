@@ -6,12 +6,14 @@
 package tailcfg
 
 import (
+	"maps"
 	"net/netip"
 	"time"
 
 	"tailscale.com/types/dnstype"
 	"tailscale.com/types/key"
 	"tailscale.com/types/opt"
+	"tailscale.com/types/ptr"
 	"tailscale.com/types/structs"
 	"tailscale.com/types/tkatype"
 )
@@ -34,7 +36,6 @@ var _UserCloneNeedsRegeneration = User(struct {
 	LoginName     string
 	DisplayName   string
 	ProfilePicURL string
-	Domain        string
 	Logins        []LoginID
 	Created       time.Time
 }{})
@@ -55,17 +56,14 @@ func (src *Node) Clone() *Node {
 	dst.Tags = append(src.Tags[:0:0], src.Tags...)
 	dst.PrimaryRoutes = append(src.PrimaryRoutes[:0:0], src.PrimaryRoutes...)
 	if dst.LastSeen != nil {
-		dst.LastSeen = new(time.Time)
-		*dst.LastSeen = *src.LastSeen
+		dst.LastSeen = ptr.To(*src.LastSeen)
 	}
 	if dst.Online != nil {
-		dst.Online = new(bool)
-		*dst.Online = *src.Online
+		dst.Online = ptr.To(*src.Online)
 	}
 	dst.Capabilities = append(src.Capabilities[:0:0], src.Capabilities...)
 	if dst.SelfNodeV4MasqAddrForThisPeer != nil {
-		dst.SelfNodeV4MasqAddrForThisPeer = new(netip.Addr)
-		*dst.SelfNodeV4MasqAddrForThisPeer = *src.SelfNodeV4MasqAddrForThisPeer
+		dst.SelfNodeV4MasqAddrForThisPeer = ptr.To(*src.SelfNodeV4MasqAddrForThisPeer)
 	}
 	return dst
 }
@@ -119,8 +117,7 @@ func (src *Hostinfo) Clone() *Hostinfo {
 	dst.NetInfo = src.NetInfo.Clone()
 	dst.SSH_HostKeys = append(src.SSH_HostKeys[:0:0], src.SSH_HostKeys...)
 	if dst.Location != nil {
-		dst.Location = new(Location)
-		*dst.Location = *src.Location
+		dst.Location = ptr.To(*src.Location)
 	}
 	return dst
 }
@@ -171,12 +168,7 @@ func (src *NetInfo) Clone() *NetInfo {
 	}
 	dst := new(NetInfo)
 	*dst = *src
-	if dst.DERPLatency != nil {
-		dst.DERPLatency = map[string]float64{}
-		for k, v := range src.DERPLatency {
-			dst.DERPLatency[k] = v
-		}
-	}
+	dst.DERPLatency = maps.Clone(src.DERPLatency)
 	return dst
 }
 
@@ -195,6 +187,7 @@ var _NetInfoCloneNeedsRegeneration = NetInfo(struct {
 	PreferredDERP         int
 	LinkType              string
 	DERPLatency           map[string]float64
+	FirewallMode          string
 }{})
 
 // Clone makes a deep copy of Login.
@@ -216,7 +209,6 @@ var _LoginCloneNeedsRegeneration = Login(struct {
 	LoginName     string
 	DisplayName   string
 	ProfilePicURL string
-	Domain        string
 }{})
 
 // Clone makes a deep copy of DNSConfig.
@@ -260,6 +252,7 @@ var _DNSConfigCloneNeedsRegeneration = DNSConfig(struct {
 	CertDomains         []string
 	ExtraRecords        []DNSRecord
 	ExitNodeFilteredSet []string
+	TempCorpIssue13969  string
 }{})
 
 // Clone makes a deep copy of RegisterResponse.
@@ -286,6 +279,67 @@ var _RegisterResponseCloneNeedsRegeneration = RegisterResponse(struct {
 	Error             string
 }{})
 
+// Clone makes a deep copy of RegisterResponseAuth.
+// The result aliases no memory with the original.
+func (src *RegisterResponseAuth) Clone() *RegisterResponseAuth {
+	if src == nil {
+		return nil
+	}
+	dst := new(RegisterResponseAuth)
+	*dst = *src
+	if dst.Oauth2Token != nil {
+		dst.Oauth2Token = ptr.To(*src.Oauth2Token)
+	}
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _RegisterResponseAuthCloneNeedsRegeneration = RegisterResponseAuth(struct {
+	_           structs.Incomparable
+	Provider    string
+	LoginName   string
+	Oauth2Token *Oauth2Token
+	AuthKey     string
+}{})
+
+// Clone makes a deep copy of RegisterRequest.
+// The result aliases no memory with the original.
+func (src *RegisterRequest) Clone() *RegisterRequest {
+	if src == nil {
+		return nil
+	}
+	dst := new(RegisterRequest)
+	*dst = *src
+	dst.Auth = *src.Auth.Clone()
+	dst.Hostinfo = src.Hostinfo.Clone()
+	dst.NodeKeySignature = append(src.NodeKeySignature[:0:0], src.NodeKeySignature...)
+	if dst.Timestamp != nil {
+		dst.Timestamp = ptr.To(*src.Timestamp)
+	}
+	dst.DeviceCert = append(src.DeviceCert[:0:0], src.DeviceCert...)
+	dst.Signature = append(src.Signature[:0:0], src.Signature...)
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _RegisterRequestCloneNeedsRegeneration = RegisterRequest(struct {
+	_                structs.Incomparable
+	Version          CapabilityVersion
+	NodeKey          key.NodePublic
+	OldNodeKey       key.NodePublic
+	NLKey            key.NLPublic
+	Auth             RegisterResponseAuth
+	Expiry           time.Time
+	Followup         string
+	Hostinfo         *Hostinfo
+	Ephemeral        bool
+	NodeKeySignature tkatype.MarshaledSignature
+	SignatureType    SignatureType
+	Timestamp        *time.Time
+	DeviceCert       []byte
+	Signature        []byte
+}{})
+
 // Clone makes a deep copy of DERPHomeParams.
 // The result aliases no memory with the original.
 func (src *DERPHomeParams) Clone() *DERPHomeParams {
@@ -294,12 +348,7 @@ func (src *DERPHomeParams) Clone() *DERPHomeParams {
 	}
 	dst := new(DERPHomeParams)
 	*dst = *src
-	if dst.RegionScore != nil {
-		dst.RegionScore = map[int]float64{}
-		for k, v := range src.RegionScore {
-			dst.RegionScore[k] = v
-		}
-	}
+	dst.RegionScore = maps.Clone(src.RegionScore)
 	return dst
 }
 
@@ -393,19 +442,13 @@ func (src *SSHRule) Clone() *SSHRule {
 	dst := new(SSHRule)
 	*dst = *src
 	if dst.RuleExpires != nil {
-		dst.RuleExpires = new(time.Time)
-		*dst.RuleExpires = *src.RuleExpires
+		dst.RuleExpires = ptr.To(*src.RuleExpires)
 	}
 	dst.Principals = make([]*SSHPrincipal, len(src.Principals))
 	for i := range dst.Principals {
 		dst.Principals[i] = src.Principals[i].Clone()
 	}
-	if dst.SSHUsers != nil {
-		dst.SSHUsers = map[string]string{}
-		for k, v := range src.SSHUsers {
-			dst.SSHUsers[k] = v
-		}
-	}
+	dst.SSHUsers = maps.Clone(src.SSHUsers)
 	dst.Action = src.Action.Clone()
 	return dst
 }
@@ -428,8 +471,7 @@ func (src *SSHAction) Clone() *SSHAction {
 	*dst = *src
 	dst.Recorders = append(src.Recorders[:0:0], src.Recorders...)
 	if dst.OnRecordingFailure != nil {
-		dst.OnRecordingFailure = new(SSHRecorderFailureAction)
-		*dst.OnRecordingFailure = *src.OnRecordingFailure
+		dst.OnRecordingFailure = ptr.To(*src.OnRecordingFailure)
 	}
 	return dst
 }
@@ -530,7 +572,7 @@ var _UserProfileCloneNeedsRegeneration = UserProfile(struct {
 
 // Clone duplicates src into dst and reports whether it succeeded.
 // To succeed, <src, dst> must be of types <*T, *T> or <*T, **T>,
-// where T is one of User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,DERPHomeParams,DERPRegion,DERPMap,DERPNode,SSHRule,SSHAction,SSHPrincipal,ControlDialPlan,Location,UserProfile.
+// where T is one of User,Node,Hostinfo,NetInfo,Login,DNSConfig,RegisterResponse,RegisterResponseAuth,RegisterRequest,DERPHomeParams,DERPRegion,DERPMap,DERPNode,SSHRule,SSHAction,SSHPrincipal,ControlDialPlan,Location,UserProfile.
 func Clone(dst, src any) bool {
 	switch src := src.(type) {
 	case *User:
@@ -593,6 +635,24 @@ func Clone(dst, src any) bool {
 			*dst = *src.Clone()
 			return true
 		case **RegisterResponse:
+			*dst = src.Clone()
+			return true
+		}
+	case *RegisterResponseAuth:
+		switch dst := dst.(type) {
+		case *RegisterResponseAuth:
+			*dst = *src.Clone()
+			return true
+		case **RegisterResponseAuth:
+			*dst = src.Clone()
+			return true
+		}
+	case *RegisterRequest:
+		switch dst := dst.(type) {
+		case *RegisterRequest:
+			*dst = *src.Clone()
+			return true
+		case **RegisterRequest:
 			*dst = src.Clone()
 			return true
 		}

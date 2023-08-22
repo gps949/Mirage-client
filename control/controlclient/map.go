@@ -4,6 +4,7 @@
 package controlclient
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/netip"
@@ -11,11 +12,12 @@ import (
 
 	"tailscale.com/envknob"
 	"tailscale.com/tailcfg"
+	"tailscale.com/tstime"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
-	"tailscale.com/types/opt"
 	"tailscale.com/types/views"
+	"tailscale.com/util/cmpx"
 	"tailscale.com/wgengine/filter"
 )
 
@@ -29,14 +31,38 @@ import (
 // one MapRequest).
 type mapSession struct {
 	// Immutable fields.
-	privateNodeKey         key.NodePrivate
-	logf                   logger.Logf
-	vlogf                  logger.Logf
-	machinePubKey          key.MachinePublic
-	keepSharerAndUserSplit bool // see Options.KeepSharerAndUserSplit
+	nu             NetmapUpdater // called on changes (in addition to the optional hooks below)
+	privateNodeKey key.NodePrivate
+	logf           logger.Logf
+	vlogf          logger.Logf
+	machinePubKey  key.MachinePublic
+	altClock       tstime.Clock       // if nil, regular time is used
+	cancel         context.CancelFunc // always non-nil, shuts down caller's base long poll context
+	watchdogReset  chan struct{}      // send to request that the long poll activity watchdog timeout be reset
+
+	// sessionAliveCtx is a Background-based context that's alive for the
+	// duration of the mapSession that we own the lifetime of. It's closed by
+	// sessionAliveCtxClose.
+	sessionAliveCtx      context.Context
+	sessionAliveCtxClose context.CancelFunc // closes sessionAliveCtx
+
+	// Optional hooks, set once before use.
+
+	// onDebug specifies what to do with a *tailcfg.Debug message.
+	// If the watchdogReset chan is nil, it's not used. Otherwise it can be sent to
+	// to request that the long poll activity watchdog timeout be reset.
+	onDebug func(_ context.Context, _ *tailcfg.Debug, watchdogReset chan<- struct{}) error
+
+	// onConciseNetMapSummary, if non-nil, is called with the Netmap.VeryConcise summary
+	// whenever a map response is received.
+	onConciseNetMapSummary func(string)
+
+	// onSelfNodeChanged is called before the NetmapUpdater if the self node was
+	// changed.
+	onSelfNodeChanged func(*netmap.NetworkMap)
 
 	// Fields storing state over the course of multiple MapResponses.
-	lastNode               *tailcfg.Node
+	lastNode               tailcfg.NodeView
 	lastDNSConfig          *tailcfg.DNSConfig
 	lastDERPMap            *tailcfg.DERPMap
 	lastUserProfile        map[tailcfg.UserID]tailcfg.UserProfile
@@ -51,24 +77,131 @@ type mapSession struct {
 	lastPopBrowserURL      string
 	stickyDebug            tailcfg.Debug // accumulated opt.Bool values
 	lastTKAInfo            *tailcfg.TKAInfo
+	lastNetmapSummary      string // from NetworkMap.VeryConcise
 
 	// netMapBuilding is non-nil during a netmapForResponse call,
 	// containing the value to be returned, once fully populated.
 	netMapBuilding *netmap.NetworkMap
 }
 
-func newMapSession(privateNodeKey key.NodePrivate) *mapSession {
+// newMapSession returns a mostly unconfigured new mapSession.
+//
+// Modify its optional fields on the returned value before use.
+//
+// It must have its Close method called to release resources.
+func newMapSession(privateNodeKey key.NodePrivate, nu NetmapUpdater) *mapSession {
 	ms := &mapSession{
+		nu:              nu,
 		privateNodeKey:  privateNodeKey,
-		logf:            logger.Discard,
-		vlogf:           logger.Discard,
 		lastDNSConfig:   new(tailcfg.DNSConfig),
 		lastUserProfile: map[tailcfg.UserID]tailcfg.UserProfile{},
+		watchdogReset:   make(chan struct{}),
+
+		// Non-nil no-op defaults, to be optionally overridden by the caller.
+		logf:                   logger.Discard,
+		vlogf:                  logger.Discard,
+		cancel:                 func() {},
+		onDebug:                func(context.Context, *tailcfg.Debug, chan<- struct{}) error { return nil },
+		onConciseNetMapSummary: func(string) {},
+		onSelfNodeChanged:      func(*netmap.NetworkMap) {},
 	}
+	ms.sessionAliveCtx, ms.sessionAliveCtxClose = context.WithCancel(context.Background())
 	return ms
 }
 
+func (ms *mapSession) clock() tstime.Clock {
+	return cmpx.Or[tstime.Clock](ms.altClock, tstime.StdClock{})
+}
+
+// StartWatchdog starts the session's watchdog timer.
+// If there's no activity in too long, it tears down the connection.
+// Call Close to release these resources.
+func (ms *mapSession) StartWatchdog() {
+	timer, timedOutChan := ms.clock().NewTimer(watchdogTimeout)
+	go func() {
+		defer timer.Stop()
+		for {
+			select {
+			case <-ms.sessionAliveCtx.Done():
+				ms.vlogf("netmap: ending timeout goroutine")
+				return
+			case <-timedOutChan:
+				ms.logf("map response long-poll timed out!")
+				ms.cancel()
+				return
+			case <-ms.watchdogReset:
+				if !timer.Stop() {
+					select {
+					case <-timedOutChan:
+					case <-ms.sessionAliveCtx.Done():
+						ms.vlogf("netmap: ending timeout goroutine")
+						return
+					}
+				}
+				ms.vlogf("netmap: reset timeout timer")
+				timer.Reset(watchdogTimeout)
+			}
+		}
+	}()
+}
+
+func (ms *mapSession) Close() {
+	ms.sessionAliveCtxClose()
+}
+
+// HandleNonKeepAliveMapResponse handles a non-KeepAlive MapResponse (full or
+// incremental).
+//
+// All fields that are valid on a KeepAlive MapResponse have already been
+// handled.
+//
+// TODO(bradfitz): make this handle all fields later. For now (2023-08-20) this
+// is [re]factoring progress enough.
+func (ms *mapSession) HandleNonKeepAliveMapResponse(ctx context.Context, resp *tailcfg.MapResponse) error {
+	if debug := resp.Debug; debug != nil {
+		if err := ms.onDebug(ctx, debug, ms.watchdogReset); err != nil {
+			return err
+		}
+	}
+
+	if DevKnob.StripEndpoints() {
+		for _, p := range resp.Peers {
+			p.Endpoints = nil
+		}
+		for _, p := range resp.PeersChanged {
+			p.Endpoints = nil
+		}
+	}
+
+	// For responses that mutate the self node, check for updated nodeAttrs.
+	if resp.Node != nil {
+		if DevKnob.StripCaps() {
+			resp.Node.Capabilities = nil
+		}
+		setControlKnobsFromNodeAttrs(resp.Node.Capabilities)
+	}
+
+	// Call Node.InitDisplayNames on any changed nodes.
+	initDisplayNames(cmpx.Or(resp.Node.View(), ms.lastNode), resp)
+
+	nm := ms.netmapForResponse(resp)
+
+	ms.lastNetmapSummary = nm.VeryConcise()
+	ms.onConciseNetMapSummary(ms.lastNetmapSummary)
+
+	// If the self node changed, we might need to update persist.
+	if resp.Node != nil {
+		ms.onSelfNodeChanged(nm)
+	}
+
+	ms.nu.UpdateFullNetmap(nm)
+	return nil
+}
+
 func (ms *mapSession) addUserProfile(userID tailcfg.UserID) {
+	if userID == 0 {
+		return
+	}
 	nm := ms.netMapBuilding
 	if _, dup := nm.UserProfiles[userID]; dup {
 		// Already populated it from a previous peer.
@@ -145,33 +278,18 @@ func (ms *mapSession) netmapForResponse(resp *tailcfg.MapResponse) *netmap.Netwo
 		ms.lastTKAInfo = resp.TKAInfo
 	}
 
-	debug := resp.Debug
-	if debug != nil {
-		if debug.RandomizeClientPort {
-			debug.SetRandomizeClientPort.Set(true)
-		}
-		if debug.ForceBackgroundSTUN {
-			debug.SetForceBackgroundSTUN.Set(true)
-		}
-		copyDebugOptBools(&ms.stickyDebug, debug)
-	} else if ms.stickyDebug != (tailcfg.Debug{}) {
-		debug = new(tailcfg.Debug)
-	}
-	if debug != nil {
-		copyDebugOptBools(debug, &ms.stickyDebug)
-		if !debug.ForceBackgroundSTUN {
-			debug.ForceBackgroundSTUN, _ = ms.stickyDebug.SetForceBackgroundSTUN.Get()
-		}
-		if !debug.RandomizeClientPort {
-			debug.RandomizeClientPort, _ = ms.stickyDebug.SetRandomizeClientPort.Get()
-		}
+	// TODO(bradfitz): now that this is a view, remove some of the defensive
+	// cloning elsewhere in mapSession.
+	peerViews := make([]tailcfg.NodeView, len(resp.Peers))
+	for i, n := range resp.Peers {
+		peerViews[i] = n.View()
 	}
 
 	nm := &netmap.NetworkMap{
 		NodeKey:           ms.privateNodeKey.Public(),
 		PrivateKey:        ms.privateNodeKey,
 		MachineKey:        ms.machinePubKey,
-		Peers:             resp.Peers,
+		Peers:             peerViews,
 		UserProfiles:      make(map[tailcfg.UserID]tailcfg.UserProfile),
 		Domain:            ms.lastDomain,
 		DomainAuditLogID:  ms.lastDomainAuditLogID,
@@ -181,7 +299,6 @@ func (ms *mapSession) netmapForResponse(resp *tailcfg.MapResponse) *netmap.Netwo
 		SSHPolicy:         ms.lastSSHPolicy,
 		CollectServices:   ms.collectServices,
 		DERPMap:           ms.lastDERPMap,
-		Debug:             debug,
 		ControlHealth:     ms.lastHealth,
 		TKAEnabled:        ms.lastTKAInfo != nil && !ms.lastTKAInfo.Disabled,
 	}
@@ -195,38 +312,26 @@ func (ms *mapSession) netmapForResponse(resp *tailcfg.MapResponse) *netmap.Netwo
 	}
 
 	if resp.Node != nil {
-		ms.lastNode = resp.Node
+		ms.lastNode = resp.Node.View()
 	}
-	if node := ms.lastNode.Clone(); node != nil {
+	if node := ms.lastNode; node.Valid() {
 		nm.SelfNode = node
-		nm.Expiry = node.KeyExpiry
-		nm.Name = node.Name
-		nm.Addresses = filterSelfAddresses(node.Addresses)
-		nm.User = node.User
-		if node.Hostinfo.Valid() {
-			nm.Hostinfo = *node.Hostinfo.AsStruct()
+		nm.Expiry = node.KeyExpiry()
+		nm.Name = node.Name()
+		nm.Addresses = filterSelfAddresses(node.Addresses().AsSlice())
+		if node.Hostinfo().Valid() {
+			nm.Hostinfo = *node.Hostinfo().AsStruct()
 		}
-		if node.MachineAuthorized {
+		if node.MachineAuthorized() {
 			nm.MachineStatus = tailcfg.MachineAuthorized
 		} else {
 			nm.MachineStatus = tailcfg.MachineUnauthorized
 		}
 	}
 
-	ms.addUserProfile(nm.User)
-	magicDNSSuffix := nm.MagicDNSSuffix()
-	if nm.SelfNode != nil {
-		nm.SelfNode.InitDisplayNames(magicDNSSuffix)
-	}
+	ms.addUserProfile(nm.User())
 	for _, peer := range resp.Peers {
-		peer.InitDisplayNames(magicDNSSuffix)
-		if !peer.Sharer.IsZero() {
-			if ms.keepSharerAndUserSplit {
-				ms.addUserProfile(peer.Sharer)
-			} else {
-				peer.User = peer.Sharer
-			}
-		}
+		ms.addUserProfile(peer.Sharer)
 		ms.addUserProfile(peer.User)
 	}
 	if DevKnob.ForceProxyDNS() {
@@ -412,19 +517,4 @@ func filterSelfAddresses(in []netip.Prefix) (ret []netip.Prefix) {
 		}
 		return ret
 	}
-}
-
-func copyDebugOptBools(dst, src *tailcfg.Debug) {
-	copy := func(v *opt.Bool, s opt.Bool) {
-		if s != "" {
-			*v = s
-		}
-	}
-	copy(&dst.DERPRoute, src.DERPRoute)
-	copy(&dst.DisableSubnetsIfPAC, src.DisableSubnetsIfPAC)
-	copy(&dst.DisableUPnP, src.DisableUPnP)
-	copy(&dst.OneCGNATRoute, src.OneCGNATRoute)
-	copy(&dst.SetForceBackgroundSTUN, src.SetForceBackgroundSTUN)
-	copy(&dst.SetRandomizeClientPort, src.SetRandomizeClientPort)
-	copy(&dst.TrimWGConfig, src.TrimWGConfig)
 }

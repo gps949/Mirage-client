@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -128,11 +129,12 @@ func (e *serveEnv) newFlags(name string, setup func(fs *flag.FlagSet)) *flag.Fla
 //
 // The purpose of this interface is to allow tests to provide a mock.
 type localServeClient interface {
-	Status(context.Context) (*ipnstate.Status, error)
+	StatusWithoutPeers(context.Context) (*ipnstate.Status, error)
 	GetServeConfig(context.Context) (*ipn.ServeConfig, error)
 	SetServeConfig(context.Context, *ipn.ServeConfig) error
 	QueryFeature(ctx context.Context, feature string) (*tailcfg.QueryFeatureResponse, error)
 	WatchIPNBus(ctx context.Context, mask ipn.NotifyWatchOpt) (*tailscale.IPNBusWatcher, error)
+	IncrementCounter(ctx context.Context, name string, delta int) error
 }
 
 // serveEnv is the environment the serve command runs within. All I/O should be
@@ -156,19 +158,21 @@ type serveEnv struct {
 // The trailing dot is removed.
 // Returns an error if local client status fails.
 func (e *serveEnv) getSelfDNSName(ctx context.Context) (string, error) {
-	st, err := e.getLocalClientStatus(ctx)
+	st, err := e.getLocalClientStatusWithoutPeers(ctx)
 	if err != nil {
 		return "", fmt.Errorf("getting client status: %w", err)
 	}
 	return strings.TrimSuffix(st.Self.DNSName, "."), nil
 }
 
-// getLocalClientStatus returns the Status of the local client.
+// getLocalClientStatusWithoutPeers returns the Status of the local client
+// without any peers in the response.
+//
 // Returns error if unable to reach tailscaled or if self node is nil.
 //
 // Exits if status is not running or starting.
-func (e *serveEnv) getLocalClientStatus(ctx context.Context) (*ipnstate.Status, error) {
-	st, err := e.lc.Status(ctx)
+func (e *serveEnv) getLocalClientStatusWithoutPeers(ctx context.Context) (*ipnstate.Status, error) {
+	st, err := e.lc.StatusWithoutPeers(ctx)
 	if err != nil {
 		return nil, fixTailscaledConnectError(err)
 	}
@@ -230,6 +234,21 @@ func (e *serveEnv) runServe(ctx context.Context, args []string) error {
 	if len(args) < 2 || ((srcType == "https" || srcType == "http") && !turnOff && len(args) < 3) {
 		fmt.Fprintf(os.Stderr, "error: invalid number of arguments\n\n")
 		return flag.ErrHelp
+	}
+
+	if srcType == "https" && !turnOff {
+		// Running serve with https requires that the tailnet has enabled
+		// https cert provisioning. Send users through an interactive flow
+		// to enable this if not already done.
+		//
+		// TODO(sonia,tailscale/corp#10577): The interactive feature flow
+		// is behind a control flag. If the tailnet doesn't have the flag
+		// on, enableFeatureInteractive will error. For now, we hide that
+		// error and maintain the previous behavior (prior to 2023-08-15)
+		// of letting them edit the serve config before enabling certs.
+		e.enableFeatureInteractive(ctx, "serve", func(caps []string) bool {
+			return slices.Contains(caps, tailcfg.CapabilityHTTPS)
+		})
 	}
 
 	srcPort, err := parseServePort(srcPortStr)
@@ -624,7 +643,7 @@ func (e *serveEnv) runServeStatus(ctx context.Context, args []string) error {
 		printf("No serve config\n")
 		return nil
 	}
-	st, err := e.getLocalClientStatus(ctx)
+	st, err := e.getLocalClientStatusWithoutPeers(ctx)
 	if err != nil {
 		return err
 	}
@@ -796,17 +815,19 @@ func (e *serveEnv) enableFeatureInteractive(ctx context.Context, feature string,
 		return nil // already enabled
 	}
 	if info.Text != "" {
-		fmt.Fprintln(os.Stdout, info.Text)
+		fmt.Fprintln(os.Stdout, "\n"+info.Text)
 	}
 	if info.URL != "" {
-		fmt.Fprintln(os.Stdout, "\n         "+info.URL)
+		fmt.Fprintln(os.Stdout, "\n         "+info.URL+"\n")
 	}
 	if !info.ShouldWait {
+		e.lc.IncrementCounter(ctx, fmt.Sprintf("%s_not_awaiting_enablement", feature), 1)
 		// The feature has not been enabled yet,
 		// but the CLI should not block on user action.
 		// Once info.Text is printed, exit the CLI.
 		os.Exit(0)
 	}
+	e.lc.IncrementCounter(ctx, fmt.Sprintf("%s_awaiting_enablement", feature), 1)
 	// Block until feature is enabled.
 	watchCtx, cancelWatch := context.WithCancel(ctx)
 	defer cancelWatch()
@@ -816,6 +837,7 @@ func (e *serveEnv) enableFeatureInteractive(ctx context.Context, feature string,
 		// don't block. We still present the URL in the CLI,
 		// then close the process. Swallow the error.
 		log.Fatalf("lost connection to tailscaled: %v", err)
+		e.lc.IncrementCounter(ctx, fmt.Sprintf("%s_enablement_lost_connection", feature), 1)
 		return err
 	}
 	defer watcher.Close()
@@ -826,11 +848,13 @@ func (e *serveEnv) enableFeatureInteractive(ctx context.Context, feature string,
 			// Let the user finish enablement then rerun their
 			// command themselves.
 			log.Fatalf("lost connection to tailscaled: %v", err)
+			e.lc.IncrementCounter(ctx, fmt.Sprintf("%s_enablement_lost_connection", feature), 1)
 			return err
 		}
-		if nm := n.NetMap; nm != nil && nm.SelfNode != nil {
-			if hasRequiredCapabilities(nm.SelfNode.Capabilities) {
-				fmt.Fprintln(os.Stdout, "\nSuccess.")
+		if nm := n.NetMap; nm != nil && nm.SelfNode.Valid() {
+			if hasRequiredCapabilities(nm.SelfNode.Capabilities().AsSlice()) {
+				e.lc.IncrementCounter(ctx, fmt.Sprintf("%s_enabled", feature), 1)
+				fmt.Fprintln(os.Stdout, "Success.")
 				return nil
 			}
 		}
