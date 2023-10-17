@@ -506,7 +506,7 @@ func (s *Server) servePostNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		postData.ServerCode = ipn.DefaultControlURL
 	}
 
-	prefs, err := s.lc.GetPrefs(r.Context())
+	prefs, err = s.lc.GetPrefs(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

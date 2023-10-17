@@ -148,9 +148,9 @@ For help on subcommands, add --help after: "mirage status --help".
 	case slices.Contains(args, "file"):
 		rootCmd.Subcommands = append(rootCmd.Subcommands, fileCmd)
 	case slices.Contains(args, "serve"):
-		rootCmd.Subcommands = append(rootCmd.Subcommands, serveCmd)
+		rootCmd.Subcommands = append(rootCmd.Subcommands, serveCmd())
 	case slices.Contains(args, "funnel"):
-		rootCmd.Subcommands = append(rootCmd.Subcommands, funnelCmd)
+		rootCmd.Subcommands = append(rootCmd.Subcommands, funnelCmd())
 	case slices.Contains(args, "ssh"):
 		rootCmd.Subcommands = append(rootCmd.Subcommands, sshCmd)
 	case slices.Contains(args, "nc"):
