@@ -97,6 +97,8 @@ func newUpFlagSet(goos string, upArgs *upArgsT, cmd string) *flag.FlagSet {
 	}
 	upf := newFlagSet(cmd)
 
+	// When adding new flags, prefer to put them under "tailscale set" instead
+	// of here. Setting preferences via "tailscale up" is deprecated.
 	upf.BoolVar(&upArgs.qr, "qr", false, "show QR code for login URLs")
 	upf.StringVar(&upArgs.authKeyOrFile, "auth-key", "", `node authorization key; if it begins with "file:", then it's a path to a file containing the authkey`)
 
@@ -112,6 +114,7 @@ func newUpFlagSet(goos string, upArgs *upArgsT, cmd string) *flag.FlagSet {
 	upf.StringVar(&upArgs.hostname, "hostname", "", "hostname to use instead of the one provided by the OS")
 	upf.StringVar(&upArgs.advertiseRoutes, "advertise-routes", "", "routes to advertise to other nodes (comma-separated, e.g. \"10.0.0.0/8,192.168.0.0/24\") or empty string to not advertise routes")
 	upf.BoolVar(&upArgs.advertiseDefaultRoute, "advertise-exit-node", false, "offer to be an exit node for internet traffic for the miragenet")
+
 	if safesocket.GOOSUsesPeerCreds(goos) {
 		upf.StringVar(&upArgs.opUser, "operator", "", "Unix username to allow to operate on miraged without sudo")
 	}
@@ -497,6 +500,7 @@ func runUp(ctx context.Context, cmd string, args []string, upArgs upArgsT) (retE
 	startLoginInteractive := func() { loginOnce.Do(func() { localClient.StartLoginInteractive(ctx) }) }
 
 	go func() {
+		var cv *tailcfg.ClientVersion
 		for {
 			n, err := watcher.Next()
 			if err != nil {
@@ -506,6 +510,9 @@ func runUp(ctx context.Context, cmd string, args []string, upArgs upArgsT) (retE
 			if n.ErrMessage != nil {
 				msg := *n.ErrMessage
 				fatalf("backend error: %v\n", msg)
+			}
+			if n.ClientVersion != nil {
+				cv = n.ClientVersion
 			}
 			if s := n.State; s != nil {
 				switch *s {
@@ -525,6 +532,11 @@ func runUp(ctx context.Context, cmd string, args []string, upArgs upArgsT) (retE
 					} else if printed {
 						// Only need to print an update if we printed the "please click" message earlier.
 						fmt.Fprintf(Stderr, "Success.\n")
+						if cv != nil && !cv.RunningLatest && cv.LatestVersion != "" {
+							fmt.Fprintf(Stderr, "\nUpdate available: %v -> %v\n", version.Short(), cv.LatestVersion)
+							fmt.Fprintln(Stderr, "Changelog: https://tailscale.com/changelog/#client")
+							fmt.Fprintln(Stderr, "Run `tailscale update` or `tailscale set --auto-update` to update")
+						}
 					}
 					select {
 					case running <- true:
@@ -712,6 +724,9 @@ func init() {
 	addPrefFlagMapping("operator", "OperatorUser")
 	addPrefFlagMapping("ssh", "RunSSH")
 	addPrefFlagMapping("nickname", "ProfileName")
+	addPrefFlagMapping("update-check", "AutoUpdate")
+	addPrefFlagMapping("auto-update", "AutoUpdate")
+	addPrefFlagMapping("posture-checking", "PostureChecking")
 }
 
 func addPrefFlagMapping(flagName string, prefNames ...string) {

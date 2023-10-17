@@ -62,8 +62,23 @@ func (src *Node) Clone() *Node {
 		dst.Online = ptr.To(*src.Online)
 	}
 	dst.Capabilities = append(src.Capabilities[:0:0], src.Capabilities...)
+	if dst.CapMap != nil {
+		dst.CapMap = map[NodeCapability][]RawMessage{}
+		for k := range src.CapMap {
+			dst.CapMap[k] = append([]RawMessage{}, src.CapMap[k]...)
+		}
+	}
 	if dst.SelfNodeV4MasqAddrForThisPeer != nil {
 		dst.SelfNodeV4MasqAddrForThisPeer = ptr.To(*src.SelfNodeV4MasqAddrForThisPeer)
+	}
+	if dst.SelfNodeV6MasqAddrForThisPeer != nil {
+		dst.SelfNodeV6MasqAddrForThisPeer = ptr.To(*src.SelfNodeV6MasqAddrForThisPeer)
+	}
+	if src.ExitNodeDNSResolvers != nil {
+		dst.ExitNodeDNSResolvers = make([]*dnstype.Resolver, len(src.ExitNodeDNSResolvers))
+		for i := range dst.ExitNodeDNSResolvers {
+			dst.ExitNodeDNSResolvers[i] = src.ExitNodeDNSResolvers[i].Clone()
+		}
 	}
 	return dst
 }
@@ -82,7 +97,7 @@ var _NodeCloneNeedsRegeneration = Node(struct {
 	DiscoKey                      key.DiscoPublic
 	Addresses                     []netip.Prefix
 	AllowedIPs                    []netip.Prefix
-	Endpoints                     []string
+	Endpoints                     []netip.AddrPort
 	DERP                          string
 	Hostinfo                      HostinfoView
 	Created                       time.Time
@@ -92,7 +107,8 @@ var _NodeCloneNeedsRegeneration = Node(struct {
 	LastSeen                      *time.Time
 	Online                        *bool
 	MachineAuthorized             bool
-	Capabilities                  []string
+	Capabilities                  []NodeCapability
+	CapMap                        NodeCapMap
 	UnsignedPeerAPIOnly           bool
 	ComputedName                  string
 	computedHostIfDifferent       string
@@ -100,7 +116,9 @@ var _NodeCloneNeedsRegeneration = Node(struct {
 	DataPlaneAuditLogID           string
 	Expired                       bool
 	SelfNodeV4MasqAddrForThisPeer *netip.Addr
+	SelfNodeV6MasqAddrForThisPeer *netip.Addr
 	IsWireGuardOnly               bool
+	ExitNodeDNSResolvers          []*dnstype.Resolver
 }{})
 
 // Clone makes a deep copy of Hostinfo.
@@ -113,6 +131,7 @@ func (src *Hostinfo) Clone() *Hostinfo {
 	*dst = *src
 	dst.RoutableIPs = append(src.RoutableIPs[:0:0], src.RoutableIPs...)
 	dst.RequestTags = append(src.RequestTags[:0:0], src.RequestTags...)
+	dst.WoLMACs = append(src.WoLMACs[:0:0], src.WoLMACs...)
 	dst.Services = append(src.Services[:0:0], src.Services...)
 	dst.NetInfo = src.NetInfo.Clone()
 	dst.SSH_HostKeys = append(src.SSH_HostKeys[:0:0], src.SSH_HostKeys...)
@@ -151,6 +170,7 @@ var _HostinfoCloneNeedsRegeneration = Hostinfo(struct {
 	GoVersion       string
 	RoutableIPs     []netip.Prefix
 	RequestTags     []string
+	WoLMACs         []string
 	Services        []Service
 	NetInfo         *NetInfo
 	SSH_HostKeys    []string
@@ -219,9 +239,11 @@ func (src *DNSConfig) Clone() *DNSConfig {
 	}
 	dst := new(DNSConfig)
 	*dst = *src
-	dst.Resolvers = make([]*dnstype.Resolver, len(src.Resolvers))
-	for i := range dst.Resolvers {
-		dst.Resolvers[i] = src.Resolvers[i].Clone()
+	if src.Resolvers != nil {
+		dst.Resolvers = make([]*dnstype.Resolver, len(src.Resolvers))
+		for i := range dst.Resolvers {
+			dst.Resolvers[i] = src.Resolvers[i].Clone()
+		}
 	}
 	if dst.Routes != nil {
 		dst.Routes = map[string][]*dnstype.Resolver{}
@@ -229,9 +251,11 @@ func (src *DNSConfig) Clone() *DNSConfig {
 			dst.Routes[k] = append([]*dnstype.Resolver{}, src.Routes[k]...)
 		}
 	}
-	dst.FallbackResolvers = make([]*dnstype.Resolver, len(src.FallbackResolvers))
-	for i := range dst.FallbackResolvers {
-		dst.FallbackResolvers[i] = src.FallbackResolvers[i].Clone()
+	if src.FallbackResolvers != nil {
+		dst.FallbackResolvers = make([]*dnstype.Resolver, len(src.FallbackResolvers))
+		for i := range dst.FallbackResolvers {
+			dst.FallbackResolvers[i] = src.FallbackResolvers[i].Clone()
+		}
 	}
 	dst.Domains = append(src.Domains[:0:0], src.Domains...)
 	dst.Nameservers = append(src.Nameservers[:0:0], src.Nameservers...)
@@ -338,6 +362,7 @@ var _RegisterRequestCloneNeedsRegeneration = RegisterRequest(struct {
 	Timestamp        *time.Time
 	DeviceCert       []byte
 	Signature        []byte
+	Tailnet          string
 }{})
 
 // Clone makes a deep copy of DERPHomeParams.
@@ -365,9 +390,11 @@ func (src *DERPRegion) Clone() *DERPRegion {
 	}
 	dst := new(DERPRegion)
 	*dst = *src
-	dst.Nodes = make([]*DERPNode, len(src.Nodes))
-	for i := range dst.Nodes {
-		dst.Nodes[i] = src.Nodes[i].Clone()
+	if src.Nodes != nil {
+		dst.Nodes = make([]*DERPNode, len(src.Nodes))
+		for i := range dst.Nodes {
+			dst.Nodes[i] = src.Nodes[i].Clone()
+		}
 	}
 	return dst
 }
@@ -444,9 +471,11 @@ func (src *SSHRule) Clone() *SSHRule {
 	if dst.RuleExpires != nil {
 		dst.RuleExpires = ptr.To(*src.RuleExpires)
 	}
-	dst.Principals = make([]*SSHPrincipal, len(src.Principals))
-	for i := range dst.Principals {
-		dst.Principals[i] = src.Principals[i].Clone()
+	if src.Principals != nil {
+		dst.Principals = make([]*SSHPrincipal, len(src.Principals))
+		for i := range dst.Principals {
+			dst.Principals[i] = src.Principals[i].Clone()
+		}
 	}
 	dst.SSHUsers = maps.Clone(src.SSHUsers)
 	dst.Action = src.Action.Clone()

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { apiFetch } from "src/api"
+import { apiFetch, setUnraidCsrfToken } from "src/api"
 
 export type NodeData = {
   Profile: UserProfile
@@ -15,6 +15,8 @@ export type NodeData = {
   IsUnraid: boolean
   UnraidToken: string
   IPNVersion: string
+
+  DebugMode: "" | "login" | "full" // empty when not running in any debug mode
 }
 
 export type UserProfile = {
@@ -35,12 +37,17 @@ export default function useNodeData() {
   const [data, setData] = useState<NodeData>()
   const [isPosting, setIsPosting] = useState<boolean>(false)
 
-  const fetchNodeData = useCallback(() => {
-    apiFetch("/api/data")
-      .then((r) => r.json())
-      .then((data) => setData(data))
-      .catch((error) => console.error(error))
-  }, [setData])
+  const refreshData = useCallback(
+    () =>
+      apiFetch("/data", "GET")
+        .then((r) => r.json())
+        .then((d: NodeData) => {
+          setData(d)
+          setUnraidCsrfToken(d.IsUnraid ? d.UnraidToken : undefined)
+        })
+        .catch((error) => console.error(error)),
+    [setData]
+  )
 
   const updateNode = useCallback(
     (update: NodeUpdate) => {
@@ -56,6 +63,7 @@ export default function useNodeData() {
       setIsPosting(true)
 
       update = {
+        ...update,
         // Default to current data value for any unset fields.
         AdvertiseRoutes:
           update.AdvertiseRoutes !== undefined
@@ -67,33 +75,7 @@ export default function useNodeData() {
             : data.AdvertiseExitNode,
       }
 
-      const urlParams = new URLSearchParams(window.location.search)
-      const nextParams = new URLSearchParams({ up: "true" })
-      const token = urlParams.get("SynoToken")
-      if (token) {
-        nextParams.set("SynoToken", token)
-      }
-      const search = nextParams.toString()
-      const url = `/api/data${search ? `?${search}` : ""}`
-
-      var body, contentType: string
-
-      if (data.IsUnraid) {
-        const params = new URLSearchParams()
-        params.append("csrf_token", data.UnraidToken)
-        params.append("ts_data", JSON.stringify(update))
-        body = params.toString()
-        contentType = "application/x-www-form-urlencoded;charset=UTF-8"
-      } else {
-        body = JSON.stringify(update)
-        contentType = "application/json"
-      }
-
-      apiFetch(url, {
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": contentType },
-        body: body,
-      })
+      apiFetch("/data", "POST", update, { up: "true" })
         .then((r) => r.json())
         .then((r) => {
           setIsPosting(false)
@@ -103,13 +85,9 @@ export default function useNodeData() {
           }
           const url = r["url"]
           if (url) {
-            if (data.IsUnraid) {
-              window.open(url, "_blank")
-            } else {
-              document.location.href = url
-            }
+            window.open(url, "_blank")
           }
-          fetchNodeData()
+          refreshData()
         })
         .catch((err) => alert("Failed operation: " + err.message))
     },
@@ -117,10 +95,23 @@ export default function useNodeData() {
   )
 
   useEffect(
-    fetchNodeData,
-    // Initial data load.
+    () => {
+      // Initial data load.
+      refreshData()
+
+      // Refresh on browser tab focus.
+      const onVisibilityChange = () => {
+        document.visibilityState === "visible" && refreshData()
+      }
+      window.addEventListener("visibilitychange", onVisibilityChange)
+      return () => {
+        // Cleanup browser tab listener.
+        window.removeEventListener("visibilitychange", onVisibilityChange)
+      }
+    },
+    // Run once.
     []
   )
 
-  return { data, updateNode, isPosting }
+  return { data, refreshData, updateNode, isPosting }
 }

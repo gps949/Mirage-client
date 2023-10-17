@@ -51,6 +51,8 @@ var _PrefsCloneNeedsRegeneration = Prefs(struct {
 	NetfilterMode          preftype.NetfilterMode
 	OperatorUser           string
 	ProfileName            string
+	AutoUpdate             AutoUpdatePrefs
+	PostureChecking        bool
 	Persist                *persist.Persist
 }{})
 
@@ -75,6 +77,12 @@ func (src *ServeConfig) Clone() *ServeConfig {
 		}
 	}
 	dst.AllowFunnel = maps.Clone(src.AllowFunnel)
+	if dst.Foreground != nil {
+		dst.Foreground = map[string]*ServeConfig{}
+		for k, v := range src.Foreground {
+			dst.Foreground[k] = v.Clone()
+		}
+	}
 	return dst
 }
 
@@ -83,6 +91,8 @@ var _ServeConfigCloneNeedsRegeneration = ServeConfig(struct {
 	TCP         map[uint16]*TCPPortHandler
 	Web         map[HostPort]*WebServerConfig
 	AllowFunnel map[HostPort]bool
+	Foreground  map[string]*ServeConfig
+	ETag        string
 }{})
 
 // Clone makes a deep copy of TCPPortHandler.

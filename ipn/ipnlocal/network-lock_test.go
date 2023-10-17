@@ -29,6 +29,12 @@ import (
 	"tailscale.com/util/must"
 )
 
+type observerFunc func(controlclient.Status)
+
+func (f observerFunc) SetControlClientStatus(_ controlclient.Client, s controlclient.Status) {
+	f(s)
+}
+
 func fakeControlClient(t *testing.T, c *http.Client) *controlclient.Auto {
 	hi := hostinfo.New()
 	ni := tailcfg.NetInfo{LinkType: "wired"}
@@ -43,7 +49,7 @@ func fakeControlClient(t *testing.T, c *http.Client) *controlclient.Auto {
 		},
 		HTTPTestClient:  c,
 		NoiseTestClient: c,
-		Status:          func(controlclient.Status) {},
+		Observer:        observerFunc(func(controlclient.Status) {}),
 	}
 
 	cc, err := controlclient.NewNoStart(opts)
@@ -145,7 +151,7 @@ func TestTKAEnablementFlow(t *testing.T) {
 			PrivateNodeKey: nodePriv,
 			NetworkLockKey: nlPriv,
 		},
-	}).View()))
+	}).View(), ""))
 	b := LocalBackend{
 		capTailnetLock: true,
 		varRoot:        temp,
@@ -185,7 +191,7 @@ func TestTKADisablementFlow(t *testing.T) {
 			PrivateNodeKey: nodePriv,
 			NetworkLockKey: nlPriv,
 		},
-	}).View()))
+	}).View(), ""))
 
 	temp := t.TempDir()
 	tkaPath := filepath.Join(temp, "tka-profile", string(pm.CurrentProfile().ID))
@@ -377,7 +383,7 @@ func TestTKASync(t *testing.T) {
 					PrivateNodeKey: nodePriv,
 					NetworkLockKey: nlPriv,
 				},
-			}).View()))
+			}).View(), ""))
 
 			// Setup the tka authority on the control plane.
 			key := tka.Key{Kind: tka.Key25519, Public: nlPriv.Public().Verifier(), Votes: 2}
@@ -599,7 +605,7 @@ func TestTKADisable(t *testing.T) {
 			PrivateNodeKey: nodePriv,
 			NetworkLockKey: nlPriv,
 		},
-	}).View()))
+	}).View(), ""))
 
 	temp := t.TempDir()
 	tkaPath := filepath.Join(temp, "tka-profile", string(pm.CurrentProfile().ID))
@@ -690,7 +696,7 @@ func TestTKASign(t *testing.T) {
 			PrivateNodeKey: nodePriv,
 			NetworkLockKey: nlPriv,
 		},
-	}).View()))
+	}).View(), ""))
 
 	// Make a fake TKA authority, to seed local state.
 	disablementSecret := bytes.Repeat([]byte{0xa5}, 32)
@@ -779,7 +785,7 @@ func TestTKAForceDisable(t *testing.T) {
 			PrivateNodeKey: nodePriv,
 			NetworkLockKey: nlPriv,
 		},
-	}).View()))
+	}).View(), ""))
 
 	temp := t.TempDir()
 	tkaPath := filepath.Join(temp, "tka-profile", string(pm.CurrentProfile().ID))
@@ -874,7 +880,7 @@ func TestTKAAffectedSigs(t *testing.T) {
 			PrivateNodeKey: nodePriv,
 			NetworkLockKey: nlPriv,
 		},
-	}).View()))
+	}).View(), ""))
 
 	// Make a fake TKA authority, to seed local state.
 	disablementSecret := bytes.Repeat([]byte{0xa5}, 32)
@@ -1007,7 +1013,7 @@ func TestTKARecoverCompromisedKeyFlow(t *testing.T) {
 			PrivateNodeKey: nodePriv,
 			NetworkLockKey: nlPriv,
 		},
-	}).View()))
+	}).View(), ""))
 
 	// Make a fake TKA authority, to seed local state.
 	disablementSecret := bytes.Repeat([]byte{0xa5}, 32)
@@ -1098,7 +1104,7 @@ func TestTKARecoverCompromisedKeyFlow(t *testing.T) {
 				PrivateNodeKey: nodePriv,
 				NetworkLockKey: cosignPriv,
 			},
-		}).View()))
+		}).View(), ""))
 		b := LocalBackend{
 			varRoot: temp,
 			logf:    t.Logf,

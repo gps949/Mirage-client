@@ -22,9 +22,9 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"go4.org/mem"
@@ -42,20 +42,20 @@ import (
 	"tailscale.com/net/tlsdial"
 	"tailscale.com/net/tsdial"
 	"tailscale.com/net/tshttpproxy"
-	"tailscale.com/syncs"
+	"tailscale.com/smallzstd"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tka"
 	"tailscale.com/tstime"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
-	"tailscale.com/types/opt"
 	"tailscale.com/types/persist"
 	"tailscale.com/types/ptr"
 	"tailscale.com/types/tkatype"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/multierr"
 	"tailscale.com/util/singleflight"
+	"tailscale.com/util/syspolicy"
 	"tailscale.com/util/systemd"
 )
 
@@ -64,11 +64,10 @@ type Direct struct {
 	httpc                 *http.Client // HTTP client used to talk to tailcontrol
 	dialer                *tsdial.Dialer
 	dnsCache              *dnscache.Resolver
-	serverURL             string // URL of the tailcontrol server
+	controlKnobs          *controlknobs.Knobs // always non-nil
+	serverURL             string              // URL of the tailcontrol server
 	clock                 tstime.Clock
 	lastPrintMap          time.Time
-	newDecompressor       func() (Decompressor, error)
-	keepAlive             bool
 	logf                  logger.Logf
 	netMon                *netmon.Monitor // or nil
 	discoPubKey           key.DiscoPublic
@@ -101,6 +100,16 @@ type Direct struct {
 	lastPingURL  string // last PingRequest.URL received, for dup suppression
 }
 
+// Observer is implemented by users of the control client (such as LocalBackend)
+// to get notified of changes in the control client's status.
+type Observer interface {
+	// SetControlClientStatus is called when the client has a new status to
+	// report. The Client is provided to allow the Observer to track which
+	// Client is reporting the status, allowing it to ignore stale status
+	// reports from previous Clients.
+	SetControlClientStatus(Client, Status)
+}
+
 type Options struct {
 	Persist              persist.Persist                    // initial persistent data
 	GetMachinePrivateKey func() (key.MachinePrivate, error) // returns the machine key to use
@@ -109,8 +118,6 @@ type Options struct {
 	Clock                tstime.Clock
 	Hostinfo             *tailcfg.Hostinfo // non-nil passes ownership, nil means to use default using os.Hostname, etc
 	DiscoPublicKey       key.DiscoPublic
-	NewDecompressor      func() (Decompressor, error)
-	KeepAlive            bool
 	Logf                 logger.Logf
 	HTTPTestClient       *http.Client                 // optional HTTP client to use (for tests only)
 	NoiseTestClient      *http.Client                 // optional HTTP client to use for noise RPCs (tests only)
@@ -121,9 +128,11 @@ type Options struct {
 	OnControlTime        func(time.Time)              // optional func to notify callers of new time from control
 	Dialer               *tsdial.Dialer               // non-nil
 	C2NHandler           http.Handler                 // or nil
+	ControlKnobs         *controlknobs.Knobs          // or nil to ignore
 
-	// Status is called when there's a change in status.
-	Status func(Status)
+	// Observer is called when there's a change in status to report
+	// from the control client.
+	Observer Observer
 
 	// SkipIPForwardingCheck declares that the host's IP
 	// forwarding works and should not be double-checked by the
@@ -185,6 +194,19 @@ type NetmapUpdater interface {
 	// the diff themselves between the previous full & next full network maps.
 }
 
+// NetmapDeltaUpdater is an optional interface that can be implemented by
+// NetmapUpdater implementations to receive delta updates from the controlclient
+// rather than just full updates.
+type NetmapDeltaUpdater interface {
+	// UpdateNetmapDelta is called with discrete changes to the network map.
+	//
+	// The ok result is whether the implementation was able to apply the
+	// mutations. It might return false if its internal state doesn't
+	// support applying them or a NetmapUpdater it's wrapping doesn't
+	// implement the NetmapDeltaUpdater optional method.
+	UpdateNetmapDelta([]netmap.NodeMutation) (ok bool)
+}
+
 // NewDirect returns a new Direct client.
 func NewDirect(opts Options) (*Direct, error) {
 	if opts.ServerURL == "" {
@@ -192,6 +214,9 @@ func NewDirect(opts Options) (*Direct, error) {
 	}
 	if opts.GetMachinePrivateKey == nil {
 		return nil, errors.New("controlclient.New: no GetMachinePrivateKey specified")
+	}
+	if opts.ControlKnobs == nil {
+		opts.ControlKnobs = &controlknobs.Knobs{}
 	}
 	opts.ServerURL = strings.TrimRight(opts.ServerURL, "/")
 	serverURL, err := url.Parse(opts.ServerURL)
@@ -240,12 +265,11 @@ func NewDirect(opts Options) (*Direct, error) {
 
 	c := &Direct{
 		httpc:                 httpc,
+		controlKnobs:          opts.ControlKnobs,
 		getMachinePrivKey:     opts.GetMachinePrivateKey,
 		serverURL:             opts.ServerURL,
 		clock:                 opts.Clock,
 		logf:                  opts.Logf,
-		newDecompressor:       opts.NewDecompressor,
-		keepAlive:             opts.KeepAlive,
 		persist:               opts.Persist.View(),
 		authKey:               opts.AuthKey,
 		discoPubKey:           opts.DiscoPublicKey,
@@ -543,6 +567,11 @@ func (c *Direct) doLogin(ctx context.Context, opt loginOpt) (mustRegen bool, new
 		err = errors.New("hostinfo: BackendLogID missing")
 		return regen, opt.URL, nil, err
 	}
+
+	tailnet, err := syspolicy.GetString(syspolicy.Tailnet, "")
+	if err != nil {
+		c.logf("unable to provide Tailnet field in register request. err: %v", err)
+	}
 	now := c.clock.Now().Round(time.Second)
 	request := tailcfg.RegisterRequest{
 		Version:          1,
@@ -554,6 +583,7 @@ func (c *Direct) doLogin(ctx context.Context, opt loginOpt) (mustRegen bool, new
 		Timestamp:        &now,
 		Ephemeral:        (opt.Flags & LoginEphemeral) != 0,
 		NodeKeySignature: nodeKeySignature,
+		Tailnet:          tailnet,
 	}
 	if opt.Logout {
 		request.Expiry = time.Unix(123, 0) // far in the past
@@ -729,18 +759,6 @@ func resignNKS(priv key.NLPrivate, nodeKey key.NodePublic, oldNKS tkatype.Marsha
 	return newSig.Serialize(), nil
 }
 
-func sameEndpoints(a, b []tailcfg.Endpoint) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // newEndpoints acquires c.mu and sets the local port and endpoints and reports
 // whether they've changed.
 //
@@ -750,15 +768,11 @@ func (c *Direct) newEndpoints(endpoints []tailcfg.Endpoint) (changed bool) {
 	defer c.mu.Unlock()
 
 	// Nothing new?
-	if sameEndpoints(c.endpoints, endpoints) {
+	if slices.Equal(c.endpoints, endpoints) {
 		return false // unchanged
 	}
-	var epStrs []string
-	for _, ep := range endpoints {
-		epStrs = append(epStrs, ep.Addr.String())
-	}
-	c.logf("[v2] client.newEndpoints(%v)", epStrs)
-	c.endpoints = append(c.endpoints[:0], endpoints...)
+	c.logf("[v2] client.newEndpoints(%v)", endpoints)
+	c.endpoints = slices.Clone(endpoints)
 	return true // changed
 }
 
@@ -838,8 +852,10 @@ func (c *Direct) sendMapRequest(ctx context.Context, isStreaming bool, nu Netmap
 	hi := c.hostInfoLocked()
 	backendLogID := hi.BackendLogID
 	var epStrs []string
+	var eps []netip.AddrPort
 	var epTypes []tailcfg.EndpointType
 	for _, ep := range c.endpoints {
+		eps = append(eps, ep.Addr)
 		epStrs = append(epStrs, ep.Addr.String())
 		epTypes = append(epTypes, ep.Type)
 	}
@@ -871,10 +887,10 @@ func (c *Direct) sendMapRequest(ctx context.Context, isStreaming bool, nu Netmap
 
 	request := &tailcfg.MapRequest{
 		Version:       tailcfg.CurrentCapabilityVersion,
-		KeepAlive:     c.keepAlive,
+		KeepAlive:     true,
 		NodeKey:       persist.PublicNodeKey(),
 		DiscoKey:      c.discoPubKey,
-		Endpoints:     epStrs,
+		Endpoints:     eps,
 		EndpointTypes: epTypes,
 		Stream:        isStreaming,
 		Hostinfo:      hi,
@@ -898,9 +914,7 @@ func (c *Direct) sendMapRequest(ctx context.Context, isStreaming bool, nu Netmap
 		old := request.DebugFlags
 		request.DebugFlags = append(old[:len(old):len(old)], extraDebugFlags...)
 	}
-	if c.newDecompressor != nil {
-		request.Compress = "zstd"
-	}
+	request.Compress = "zstd"
 
 	bodyData, err := encode(request, serverKey, serverNoiseKey, machinePrivKey)
 	if err != nil {
@@ -957,7 +971,7 @@ func (c *Direct) sendMapRequest(ctx context.Context, isStreaming bool, nu Netmap
 
 	var mapResIdx int // 0 for first message, then 1+ for deltas
 
-	sess := newMapSession(persist.PrivateNodeKey(), nu)
+	sess := newMapSession(persist.PrivateNodeKey(), nu, c.controlKnobs)
 	defer sess.Close()
 	sess.cancel = cancel
 	sess.logf = c.logf
@@ -1184,19 +1198,14 @@ func (c *Direct) decodeMsg(msg []byte, v any, mkey key.MachinePrivate) error {
 	} else {
 		decrypted = msg
 	}
-	var b []byte
-	if c.newDecompressor == nil {
-		b = decrypted
-	} else {
-		decoder, err := c.newDecompressor()
-		if err != nil {
-			return err
-		}
-		defer decoder.Close()
-		b, err = decoder.DecodeAll(decrypted, nil)
-		if err != nil {
-			return err
-		}
+	decoder, err := smallzstd.NewDecoder(nil)
+	if err != nil {
+		return err
+	}
+	defer decoder.Close()
+	b, err := decoder.DecodeAll(decrypted, nil)
+	if err != nil {
+		return err
 	}
 	if debugMap() {
 		var buf bytes.Buffer
@@ -1302,68 +1311,6 @@ func initDevKnob() devKnobs {
 }
 
 var clock tstime.Clock = tstime.StdClock{}
-
-// config from control.
-var (
-	controlDisableDRPO         atomic.Bool
-	controlKeepFullWGConfig    atomic.Bool
-	controlRandomizeClientPort atomic.Bool
-	controlOneCGNAT            syncs.AtomicValue[opt.Bool]
-)
-
-// DisableDRPO reports whether control says to disable the
-// DERP route optimization (Issue 150).
-func DisableDRPO() bool {
-	return controlDisableDRPO.Load()
-}
-
-// KeepFullWGConfig reports whether control says we should disable the lazy
-// wireguard programming and instead give it the full netmap always.
-func KeepFullWGConfig() bool {
-	return controlKeepFullWGConfig.Load()
-}
-
-// RandomizeClientPort reports whether control says we should randomize
-// the client port.
-func RandomizeClientPort() bool {
-	return controlRandomizeClientPort.Load()
-}
-
-// ControlOneCGNATSetting returns control's OneCGNAT setting, if any.
-func ControlOneCGNATSetting() opt.Bool {
-	return controlOneCGNAT.Load()
-}
-
-func setControlKnobsFromNodeAttrs(selfNodeAttrs []string) {
-	var (
-		keepFullWG          bool
-		disableDRPO         bool
-		disableUPnP         bool
-		randomizeClientPort bool
-		oneCGNAT            opt.Bool
-	)
-	for _, attr := range selfNodeAttrs {
-		switch attr {
-		case tailcfg.NodeAttrDebugDisableWGTrim:
-			keepFullWG = true
-		case tailcfg.NodeAttrDebugDisableDRPO:
-			disableDRPO = true
-		case tailcfg.NodeAttrDisableUPnP:
-			disableUPnP = true
-		case tailcfg.NodeAttrRandomizeClientPort:
-			randomizeClientPort = true
-		case tailcfg.NodeAttrOneCGNATEnable:
-			oneCGNAT.Set(true)
-		case tailcfg.NodeAttrOneCGNATDisable:
-			oneCGNAT.Set(false)
-		}
-	}
-	controlKeepFullWGConfig.Store(keepFullWG)
-	controlDisableDRPO.Store(disableDRPO)
-	controlknobs.SetDisableUPnP(disableUPnP)
-	controlRandomizeClientPort.Store(randomizeClientPort)
-	controlOneCGNAT.Store(oneCGNAT)
-}
 
 // ipForwardingBroken reports whether the system's IP forwarding is disabled
 // and will definitely not work for the routes provided.
@@ -1563,7 +1510,7 @@ func (c *Direct) getNoiseClient() (*NoiseClient, error) {
 		if err != nil {
 			return nil, err
 		}
-		c.logf("creating new noise client")
+		c.logf("[v1] creating new noise client")
 		nc, err := NewNoiseClient(NoiseOpts{
 			PrivKey:      k,
 			ServerPubKey: serverNoiseKey,

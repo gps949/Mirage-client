@@ -124,6 +124,8 @@ func TestViewUtils(t *testing.T) {
 	c.Check(v.IndexFunc(func(s string) bool { return strings.HasPrefix(s, "z") }), qt.Equals, -1)
 	c.Check(SliceContains(v, "bar"), qt.Equals, true)
 	c.Check(SliceContains(v, "baz"), qt.Equals, false)
+	c.Check(SliceContainsFunc(v, func(s string) bool { return strings.HasPrefix(s, "f") }), qt.Equals, true)
+	c.Check(SliceContainsFunc(v, func(s string) bool { return len(s) > 3 }), qt.Equals, false)
 	c.Check(SliceEqualAnyOrder(v, v), qt.Equals, true)
 	c.Check(SliceEqualAnyOrder(v, SliceOf([]string{"bar", "foo"})), qt.Equals, true)
 	c.Check(SliceEqualAnyOrder(v, SliceOf([]string{"foo"})), qt.Equals, false)
@@ -148,5 +150,19 @@ func TestLenIter(t *testing.T) {
 	}
 	if !reflect.DeepEqual(orig, got) {
 		t.Errorf("got %q; want %q", got, orig)
+	}
+}
+
+func TestSliceEqual(t *testing.T) {
+	a := SliceOf([]string{"foo", "bar"})
+	b := SliceOf([]string{"foo", "bar"})
+	if !SliceEqual(a, b) {
+		t.Errorf("got a != b")
+	}
+	if !SliceEqual(a.SliceTo(0), b.SliceTo(0)) {
+		t.Errorf("got a[:0] != b[:0]")
+	}
+	if SliceEqual(a.SliceTo(2), a.SliceTo(1)) {
+		t.Error("got a[:2] == a[:1]")
 	}
 }

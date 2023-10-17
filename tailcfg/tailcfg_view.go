@@ -142,7 +142,7 @@ func (v NodeView) Machine() key.MachinePublic               { return v.ж.Machin
 func (v NodeView) DiscoKey() key.DiscoPublic                { return v.ж.DiscoKey }
 func (v NodeView) Addresses() views.Slice[netip.Prefix]     { return views.SliceOf(v.ж.Addresses) }
 func (v NodeView) AllowedIPs() views.Slice[netip.Prefix]    { return views.SliceOf(v.ж.AllowedIPs) }
-func (v NodeView) Endpoints() views.Slice[string]           { return views.SliceOf(v.ж.Endpoints) }
+func (v NodeView) Endpoints() views.Slice[netip.AddrPort]   { return views.SliceOf(v.ж.Endpoints) }
 func (v NodeView) DERP() string                             { return v.ж.DERP }
 func (v NodeView) Hostinfo() HostinfoView                   { return v.ж.Hostinfo }
 func (v NodeView) Created() time.Time                       { return v.ж.Created }
@@ -165,13 +165,19 @@ func (v NodeView) Online() *bool {
 	return &x
 }
 
-func (v NodeView) MachineAuthorized() bool           { return v.ж.MachineAuthorized }
-func (v NodeView) Capabilities() views.Slice[string] { return views.SliceOf(v.ж.Capabilities) }
-func (v NodeView) UnsignedPeerAPIOnly() bool         { return v.ж.UnsignedPeerAPIOnly }
-func (v NodeView) ComputedName() string              { return v.ж.ComputedName }
-func (v NodeView) ComputedNameWithHost() string      { return v.ж.ComputedNameWithHost }
-func (v NodeView) DataPlaneAuditLogID() string       { return v.ж.DataPlaneAuditLogID }
-func (v NodeView) Expired() bool                     { return v.ж.Expired }
+func (v NodeView) MachineAuthorized() bool                   { return v.ж.MachineAuthorized }
+func (v NodeView) Capabilities() views.Slice[NodeCapability] { return views.SliceOf(v.ж.Capabilities) }
+
+func (v NodeView) CapMap() views.MapFn[NodeCapability, []RawMessage, views.Slice[RawMessage]] {
+	return views.MapFnOf(v.ж.CapMap, func(t []RawMessage) views.Slice[RawMessage] {
+		return views.SliceOf(t)
+	})
+}
+func (v NodeView) UnsignedPeerAPIOnly() bool    { return v.ж.UnsignedPeerAPIOnly }
+func (v NodeView) ComputedName() string         { return v.ж.ComputedName }
+func (v NodeView) ComputedNameWithHost() string { return v.ж.ComputedNameWithHost }
+func (v NodeView) DataPlaneAuditLogID() string  { return v.ж.DataPlaneAuditLogID }
+func (v NodeView) Expired() bool                { return v.ж.Expired }
 func (v NodeView) SelfNodeV4MasqAddrForThisPeer() *netip.Addr {
 	if v.ж.SelfNodeV4MasqAddrForThisPeer == nil {
 		return nil
@@ -180,7 +186,18 @@ func (v NodeView) SelfNodeV4MasqAddrForThisPeer() *netip.Addr {
 	return &x
 }
 
-func (v NodeView) IsWireGuardOnly() bool  { return v.ж.IsWireGuardOnly }
+func (v NodeView) SelfNodeV6MasqAddrForThisPeer() *netip.Addr {
+	if v.ж.SelfNodeV6MasqAddrForThisPeer == nil {
+		return nil
+	}
+	x := *v.ж.SelfNodeV6MasqAddrForThisPeer
+	return &x
+}
+
+func (v NodeView) IsWireGuardOnly() bool { return v.ж.IsWireGuardOnly }
+func (v NodeView) ExitNodeDNSResolvers() views.SliceView[*dnstype.Resolver, dnstype.ResolverView] {
+	return views.SliceOfViews[*dnstype.Resolver, dnstype.ResolverView](v.ж.ExitNodeDNSResolvers)
+}
 func (v NodeView) Equal(v2 NodeView) bool { return v.ж.Equal(v2.ж) }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
@@ -197,7 +214,7 @@ var _NodeViewNeedsRegeneration = Node(struct {
 	DiscoKey                      key.DiscoPublic
 	Addresses                     []netip.Prefix
 	AllowedIPs                    []netip.Prefix
-	Endpoints                     []string
+	Endpoints                     []netip.AddrPort
 	DERP                          string
 	Hostinfo                      HostinfoView
 	Created                       time.Time
@@ -207,7 +224,8 @@ var _NodeViewNeedsRegeneration = Node(struct {
 	LastSeen                      *time.Time
 	Online                        *bool
 	MachineAuthorized             bool
-	Capabilities                  []string
+	Capabilities                  []NodeCapability
+	CapMap                        NodeCapMap
 	UnsignedPeerAPIOnly           bool
 	ComputedName                  string
 	computedHostIfDifferent       string
@@ -215,7 +233,9 @@ var _NodeViewNeedsRegeneration = Node(struct {
 	DataPlaneAuditLogID           string
 	Expired                       bool
 	SelfNodeV4MasqAddrForThisPeer *netip.Addr
+	SelfNodeV6MasqAddrForThisPeer *netip.Addr
 	IsWireGuardOnly               bool
+	ExitNodeDNSResolvers          []*dnstype.Resolver
 }{})
 
 // View returns a readonly view of Hostinfo.
@@ -290,6 +310,7 @@ func (v HostinfoView) GoArchVar() string                      { return v.ж.GoAr
 func (v HostinfoView) GoVersion() string                      { return v.ж.GoVersion }
 func (v HostinfoView) RoutableIPs() views.Slice[netip.Prefix] { return views.SliceOf(v.ж.RoutableIPs) }
 func (v HostinfoView) RequestTags() views.Slice[string]       { return views.SliceOf(v.ж.RequestTags) }
+func (v HostinfoView) WoLMACs() views.Slice[string]           { return views.SliceOf(v.ж.WoLMACs) }
 func (v HostinfoView) Services() views.Slice[Service]         { return views.SliceOf(v.ж.Services) }
 func (v HostinfoView) NetInfo() NetInfoView                   { return v.ж.NetInfo.View() }
 func (v HostinfoView) SSH_HostKeys() views.Slice[string]      { return views.SliceOf(v.ж.SSH_HostKeys) }
@@ -335,6 +356,7 @@ var _HostinfoViewNeedsRegeneration = Hostinfo(struct {
 	GoVersion       string
 	RoutableIPs     []netip.Prefix
 	RequestTags     []string
+	WoLMACs         []string
 	Services        []Service
 	NetInfo         *NetInfo
 	SSH_HostKeys    []string
@@ -770,6 +792,7 @@ func (v RegisterRequestView) DeviceCert() views.ByteSlice[[]byte] {
 func (v RegisterRequestView) Signature() views.ByteSlice[[]byte] {
 	return views.ByteSliceOf(v.ж.Signature)
 }
+func (v RegisterRequestView) Tailnet() string { return v.ж.Tailnet }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _RegisterRequestViewNeedsRegeneration = RegisterRequest(struct {
@@ -788,6 +811,7 @@ var _RegisterRequestViewNeedsRegeneration = RegisterRequest(struct {
 	Timestamp        *time.Time
 	DeviceCert       []byte
 	Signature        []byte
+	Tailnet          string
 }{})
 
 // View returns a readonly view of DERPHomeParams.

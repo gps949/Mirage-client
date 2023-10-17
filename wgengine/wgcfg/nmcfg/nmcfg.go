@@ -15,7 +15,6 @@ import (
 	"tailscale.com/types/logger"
 	"tailscale.com/types/logid"
 	"tailscale.com/types/netmap"
-	"tailscale.com/types/views"
 	"tailscale.com/wgengine/wgcfg"
 )
 
@@ -56,14 +55,14 @@ func WGCfg(nm *netmap.NetworkMap, logf logger.Logf, flags netmap.WGConfigFlags, 
 	cfg := &wgcfg.Config{
 		Name:       "tailscale",
 		PrivateKey: nm.PrivateKey,
-		Addresses:  nm.Addresses,
+		Addresses:  nm.GetAddresses().AsSlice(),
 		Peers:      make([]wgcfg.Peer, 0, len(nm.Peers)),
 	}
 
 	// Setup log IDs for data plane audit logging.
 	if nm.SelfNode.Valid() {
 		cfg.NodeID = nm.SelfNode.StableID()
-		canNetworkLog := views.SliceContains(nm.SelfNode.Capabilities(), tailcfg.CapabilityDataPlaneAuditLogs)
+		canNetworkLog := nm.SelfNode.HasCap(tailcfg.CapabilityDataPlaneAuditLogs)
 		if canNetworkLog && nm.SelfNode.DataPlaneAuditLogID() != "" && nm.DomainAuditLogID != "" {
 			nodeID, errNode := logid.ParsePrivateID(nm.SelfNode.DataPlaneAuditLogID())
 			if errNode != nil {
@@ -100,6 +99,7 @@ func WGCfg(nm *netmap.NetworkMap, logf logger.Logf, flags netmap.WGConfigFlags, 
 
 		didExitNodeWarn := false
 		cpeer.V4MasqAddr = peer.SelfNodeV4MasqAddrForThisPeer()
+		cpeer.V6MasqAddr = peer.SelfNodeV6MasqAddrForThisPeer()
 		for i := range peer.AllowedIPs().LenIter() {
 			allowedIP := peer.AllowedIPs().At(i)
 			if allowedIP.Bits() == 0 && peer.StableID() != exitNode {

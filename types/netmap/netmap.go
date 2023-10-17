@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"tailscale.com/tka"
 	"tailscale.com/types/key"
 	"tailscale.com/types/views"
+	"tailscale.com/util/cmpx"
 	"tailscale.com/wgengine/filter"
 )
 
@@ -23,8 +25,6 @@ import (
 // The fields should all be considered read-only. They might
 // alias parts of previous NetworkMap values.
 type NetworkMap struct {
-	// Core networking
-
 	SelfNode   tailcfg.NodeView
 	NodeKey    key.NodePublic
 	PrivateKey key.NodePrivate
@@ -33,21 +33,11 @@ type NetworkMap struct {
 	// It is the MapResponse.Node.Name value and ends with a period.
 	Name string
 
-	// Addresses is SelfNode.Addresses. (IP addresses of this Node directly)
-	//
-	// TODO(bradfitz): remove this field and make this a method.
-	Addresses []netip.Prefix
-
-	// MachineStatus is either tailcfg.MachineAuthorized or tailcfg.MachineUnauthorized,
-	// depending on SelfNode.MachineAuthorized.
-	// TODO(bradfitz): remove this field and make it a method.
-	MachineStatus tailcfg.MachineStatus
-
 	MachineKey key.MachinePublic
-	Peers      []tailcfg.NodeView // sorted by Node.ID
-	DNS        tailcfg.DNSConfig
-	// TODO(maisem) : replace with View.
-	Hostinfo          tailcfg.Hostinfo
+
+	Peers []tailcfg.NodeView // sorted by Node.ID
+	DNS   tailcfg.DNSConfig
+
 	PacketFilter      []filter.Match
 	PacketFilterRules views.Slice[tailcfg.FilterRule]
 	SSHPolicy         *tailcfg.SSHPolicy // or nil, if not enabled/allowed
@@ -96,6 +86,16 @@ func (nm *NetworkMap) User() tailcfg.UserID {
 	return 0
 }
 
+// GetAddresses returns the self node's addresses, or the zero value
+// if SelfNode is invalid.
+func (nm *NetworkMap) GetAddresses() views.Slice[netip.Prefix] {
+	var zero views.Slice[netip.Prefix]
+	if !nm.SelfNode.Valid() {
+		return zero
+	}
+	return nm.SelfNode.Addresses()
+}
+
 // AnyPeersAdvertiseRoutes reports whether any peer is advertising non-exit node routes.
 func (nm *NetworkMap) AnyPeersAdvertiseRoutes() bool {
 	for _, p := range nm.Peers {
@@ -104,6 +104,17 @@ func (nm *NetworkMap) AnyPeersAdvertiseRoutes() bool {
 		}
 	}
 	return false
+}
+
+// GetMachineStatus returns the MachineStatus of the local node.
+func (nm *NetworkMap) GetMachineStatus() tailcfg.MachineStatus {
+	if !nm.SelfNode.Valid() {
+		return tailcfg.MachineUnknown
+	}
+	if nm.SelfNode.MachineAuthorized() {
+		return tailcfg.MachineAuthorized
+	}
+	return tailcfg.MachineUnauthorized
 }
 
 // PeerByTailscaleIP returns a peer's Node based on its Tailscale IP.
@@ -126,6 +137,23 @@ func (nm *NetworkMap) PeerByTailscaleIP(ip netip.Addr) (peer tailcfg.NodeView, o
 	return tailcfg.NodeView{}, false
 }
 
+// PeerIndexByNodeID returns the index of the peer with the given nodeID
+// in nm.Peers, or -1 if nm is nil or not found.
+//
+// It assumes nm.Peers is sorted by Node.ID.
+func (nm *NetworkMap) PeerIndexByNodeID(nodeID tailcfg.NodeID) int {
+	if nm == nil {
+		return -1
+	}
+	idx, ok := sort.Find(len(nm.Peers), func(i int) int {
+		return cmpx.Compare(nodeID, nm.Peers[i].ID())
+	})
+	if !ok {
+		return -1
+	}
+	return idx
+}
+
 // MagicDNSSuffix returns the domain's MagicDNS suffix (even if MagicDNS isn't
 // necessarily in use) of the provided Node.Name value.
 //
@@ -143,19 +171,27 @@ func MagicDNSSuffixOfNodeName(nodeName string) string {
 //
 // It will neither start nor end with a period.
 func (nm *NetworkMap) MagicDNSSuffix() string {
+	if nm == nil {
+		return ""
+	}
 	return MagicDNSSuffixOfNodeName(nm.Name)
 }
 
 // SelfCapabilities returns SelfNode.Capabilities if nm and nm.SelfNode are
 // non-nil. This is a method so we can use it in envknob/logknob without a
 // circular dependency.
-func (nm *NetworkMap) SelfCapabilities() views.Slice[string] {
-	var zero views.Slice[string]
+func (nm *NetworkMap) SelfCapabilities() views.Slice[tailcfg.NodeCapability] {
+	var zero views.Slice[tailcfg.NodeCapability]
 	if nm == nil || !nm.SelfNode.Valid() {
 		return zero
 	}
+	out := nm.SelfNode.Capabilities().AsSlice()
+	nm.SelfNode.CapMap().Range(func(k tailcfg.NodeCapability, _ views.Slice[tailcfg.RawMessage]) (cont bool) {
+		out = append(out, k)
+		return true
+	})
 
-	return nm.SelfNode.Capabilities()
+	return views.SliceOf(out)
 }
 
 func (nm *NetworkMap) String() string {
@@ -194,7 +230,7 @@ func (nm *NetworkMap) PeerWithStableID(pid tailcfg.StableNodeID) (_ tailcfg.Node
 // in equalConciseHeader in sync.
 func (nm *NetworkMap) printConciseHeader(buf *strings.Builder) {
 	fmt.Fprintf(buf, "netmap: self: %v auth=%v",
-		nm.NodeKey.ShortString(), nm.MachineStatus)
+		nm.NodeKey.ShortString(), nm.GetMachineStatus())
 	login := nm.UserProfiles[nm.User()].LoginName
 	if login == "" {
 		if nm.User().IsZero() {
@@ -204,25 +240,17 @@ func (nm *NetworkMap) printConciseHeader(buf *strings.Builder) {
 		}
 	}
 	fmt.Fprintf(buf, " u=%s", login)
-	fmt.Fprintf(buf, " %v", nm.Addresses)
+	fmt.Fprintf(buf, " %v", nm.GetAddresses().AsSlice())
 	buf.WriteByte('\n')
 }
 
 // equalConciseHeader reports whether a and b are equal for the fields
 // used by printConciseHeader.
 func (a *NetworkMap) equalConciseHeader(b *NetworkMap) bool {
-	if a.NodeKey != b.NodeKey ||
-		a.MachineStatus != b.MachineStatus ||
-		a.User() != b.User() ||
-		len(a.Addresses) != len(b.Addresses) {
-		return false
-	}
-	for i, a := range a.Addresses {
-		if b.Addresses[i] != a {
-			return false
-		}
-	}
-	return true
+	return a.NodeKey == b.NodeKey &&
+		a.GetMachineStatus() == b.GetMachineStatus() &&
+		a.User() == b.User() &&
+		views.SliceEqual(a.GetAddresses(), b.GetAddresses())
 }
 
 // printPeerConcise appends to buf a line representing the peer p.
@@ -239,7 +267,7 @@ func printPeerConcise(buf *strings.Builder, p tailcfg.NodeView) {
 
 	ep := make([]string, p.Endpoints().Len())
 	for i := range ep {
-		e := p.Endpoints().At(i)
+		e := p.Endpoints().At(i).String()
 		// Align vertically on the ':' between IP and port
 		colon := strings.IndexByte(e, ':')
 		spaces := 0
@@ -276,8 +304,8 @@ func nodeConciseEqual(a, b tailcfg.NodeView) bool {
 	return a.Key() == b.Key() &&
 		a.DERP() == b.DERP() &&
 		a.DiscoKey() == b.DiscoKey() &&
-		eqViewsIgnoreNil(a.AllowedIPs(), b.AllowedIPs()) &&
-		eqViewsIgnoreNil(a.Endpoints(), b.Endpoints())
+		views.SliceEqual(a.AllowedIPs(), b.AllowedIPs()) &&
+		views.SliceEqual(a.Endpoints(), b.Endpoints())
 }
 
 func (b *NetworkMap) ConciseDiffFrom(a *NetworkMap) string {
@@ -343,21 +371,3 @@ const (
 	AllowSingleHosts WGConfigFlags = 1 << iota
 	AllowSubnetRoutes
 )
-
-// eqViewsIgnoreNil reports whether a and b have the same length and comparably
-// equal values at each index. It's used for comparing views of slices and not
-// caring about whether the slices are nil or not.
-func eqViewsIgnoreNil[T comparable](a, b interface {
-	Len() int
-	At(int) T
-}) bool {
-	if a.Len() != b.Len() {
-		return false
-	}
-	for i, n := 0, a.Len(); i < n; i++ {
-		if a.At(i) != b.At(i) {
-			return false
-		}
-	}
-	return true
-}

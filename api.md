@@ -209,10 +209,6 @@ You can also [list all devices in the tailnet](#list-tailnet-devices) to get the
       "192.68.0.21:59128"
     ],
 
-    // derp (string) is the IP:port of the DERP server currently being used.
-    // Learn about DERP servers at https://tailscale.com/kb/1232/.
-    "derp":"",
-
     // mappingVariesByDestIP (boolean) is 'true' if the host's NAT mappings
     // vary based on the destination IP.
     "mappingVariesByDestIP":false,
@@ -1431,6 +1427,18 @@ The response is a JSON object with information about the key supplied.
     }
   },
   "description": "dev access"
+}
+```
+
+Response for a revoked (deleted) or expired key will have an `invalid` field set to `true`:
+
+``` jsonc
+{
+  "id": "abc123456CNTRL",
+  "created": "2022-05-05T18:55:44Z",
+  "expires": "2022-08-03T18:55:44Z",
+  "revoked": "2023-04-01T20:50:00Z",
+  "invalid": true
 }
 ```
 

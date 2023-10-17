@@ -117,10 +117,15 @@ For help on subcommands, add --help after: "mirage status --help".
 			ipCmd,
 			statusCmd,
 			pingCmd,
+			ncCmd,
+			sshCmd,
+			funnelCmd(),
+			serveCmd(),
 			versionCmd,
 			//			bugReportCmd,
 			//			licensesCmd,
 			exitNodeCmd,
+			updateCmd,
 		},
 		FlagSet:   rootfs,
 		Exec:      func(context.Context, []string) error { return flag.ErrHelp },
@@ -156,8 +161,6 @@ For help on subcommands, add --help after: "mirage status --help".
 		rootCmd.Subcommands = append(rootCmd.Subcommands, configureCmd)
 	case slices.Contains(args, "debug"):
 		rootCmd.Subcommands = append(rootCmd.Subcommands, debugCmd)
-	case slices.Contains(args, "update"):
-		rootCmd.Subcommands = append(rootCmd.Subcommands, updateCmd)
 	}
 	if runtime.GOOS == "linux" && distro.Get() == distro.Synology {
 		rootCmd.Subcommands = append(rootCmd.Subcommands, configureHostCmd)
